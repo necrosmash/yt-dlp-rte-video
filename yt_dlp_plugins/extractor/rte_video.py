@@ -26,6 +26,7 @@ import re
 import urllib.parse
 
 from yt_dlp.extractor.common import InfoExtractor
+from yt_dlp.networking.exceptions import HTTPError
 from yt_dlp.utils import (
     ExtractorError,
     OnDemandPagedList,
@@ -50,7 +51,7 @@ class _RteBaseIE(InfoExtractor):
     _STATIONS = {
         'radio1': (9, 'RTÉ Radio 1'),
         '2fm': (1, 'RTÉ 2FM'),
-        'lyricfm': (16, 'RTÉ lyric fm'),
+        'lyricfm': (16, 'RTÉ Lyric FM'),
         'rnag': (17, 'RTÉ Raidió na Gaeltachta'),
         'gold': (22, 'RTÉ Gold'),
     }
@@ -365,7 +366,7 @@ class RteClipIE(_RteBaseIE):
         genre = unescapeHTML(show.get('genre'))
         return {
             'id': item_id,
-            'title': unescapeHTML(show.get('title')),
+            'title': (unescapeHTML(show.get('title')) or '').strip() or None,
             'description': unescapeHTML(show.get('description')) or None,
             'duration': float_or_none(show.get('duration'), 1000),
             'timestamp': timestamp,
@@ -447,9 +448,16 @@ class RteRadioProgrammeIE(_RteBaseIE):
     }]
 
     def _fetch_page(self, station, programme, page):
-        data = self._download_json(
-            f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
-            f'Downloading episodes page {page + 1}', query={'page': page + 1}, fatal=page > 0)
+        # RTE's num_pages/total_items are unreliable; the list ends with a short page or,
+        # when the last page is exactly full, with HTTP 404 for the next one
+        try:
+            data = self._download_json(
+                f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
+                f'Downloading episodes page {page + 1}', query={'page': page + 1})
+        except ExtractorError as e:
+            if page > 0 and isinstance(e.cause, HTTPError) and e.cause.status == 404:
+                return
+            raise
         channel = self._station_name(station)
         for ep in traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))):
             ep_id = self._normalise_id(ep.get('id') or ep['itemid'])
