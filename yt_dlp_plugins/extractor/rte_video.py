@@ -83,6 +83,16 @@ class _RteBaseIE(InfoExtractor):
         return utc_guess if last_sunday(3) <= utc_guess < last_sunday(10) else ts
 
     @staticmethod
+    def _utc_date(timestamp):
+        """YYYYMMDD in UTC, as yt-dlp derives upload_date from timestamp.
+
+        Playlist entries must carry upload_date themselves: yt-dlp's --dateafter/--datebefore
+        check on unopened playlist entries only looks at upload_date, not timestamp."""
+        if timestamp is None:
+            return None
+        return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).strftime('%Y%m%d')
+
+    @staticmethod
     def _normalise_id(item_id):
         item_id = str(item_id).strip().lower()
         return str(int(item_id)) if item_id.isdigit() else item_id
@@ -256,6 +266,7 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
             info = self._entry_metadata(entry)
             yield self.url_result(
                 f'https://www.rte.ie/video/id/{info["id"]}/', RteVideoIE, info['id'],
+                upload_date=self._utc_date(info['timestamp']),
                 **{k: v for k, v in info.items() if k not in ('id', 'display_id')})
 
     def _real_extract(self, url):
@@ -449,6 +460,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
             yield self.url_result(
                 ep_url, RteClipIE, ep_id, unescapeHTML(ep.get('title')),
                 timestamp=timestamp, release_timestamp=timestamp,
+                upload_date=self._utc_date(timestamp), release_date=self._utc_date(timestamp),
                 duration=float_or_none(ep.get('duration'), 1000),
                 series=unescapeHTML(ep.get('programme_title')) or None,
                 channel=channel, media_type='episode')
