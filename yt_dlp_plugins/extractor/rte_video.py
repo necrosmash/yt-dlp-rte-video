@@ -5,9 +5,14 @@ Install: <plugins dir>/yt-dlp-rte-video/yt_dlp_plugins/extractor/rte_video.py
   e.g. ~/.yt-dlp/plugins/yt-dlp-rte-video/yt_dlp_plugins/extractor/rte_video.py
 
 Supported URLs
-  https://www.rte.ie/video/id/38228/                     rte.ie/video clip
-  https://www.rte.ie/video/category/News/                rte.ie/video category (playlist)
-  https://www.rte.ie/video/                              all of rte.ie/video (playlist)
+  https://www.rte.ie/video/id/38228/                                rte.ie/video clip
+  https://www.rte.ie/video/category/News/                           rte.ie/video category (playlist)
+  https://www.rte.ie/video/                                         all of rte.ie/video (playlist)
+  https://www.rte.ie/news/<section>/<yyyy>/<mmdd>/<id>-<slug>/      news article video(s), via embeds
+  https://www.rte.ie/archives/<yyyy>/<mmdd>/<id>-<slug>/            RTE Archives clip, with broadcast date
+  https://www.rte.ie/radio/<station>/clips/<id>/                    radio clip (audio)
+  https://www.rte.ie/radio/<station>/<programme>/episodes/<id>/     radio episode (audio)
+  https://www.rte.ie/radio/<station>/<programme>/                   radio programme (playlist of episodes)
 
 Items RTE marks as DRM-protected are reported as DRM and not downloaded.
 RTE Player (/player/...) and live TV use DRM and are not supported.
@@ -15,6 +20,10 @@ Geo-restriction is handled like yt-dlp's SVT extractor: Ireland is named in the
 error, and no fake IP is sent unless the user asks for it with --xff.
 """
 import base64
+import calendar
+import datetime as dt
+import re
+import urllib.parse
 
 from yt_dlp.extractor.common import InfoExtractor
 from yt_dlp.utils import (
@@ -23,6 +32,8 @@ from yt_dlp.utils import (
     float_or_none,
     int_or_none,
     unescapeHTML,
+    unified_strdate,
+    unified_timestamp,
     url_or_none,
 )
 from yt_dlp.utils.traversal import traverse_obj
@@ -34,6 +45,47 @@ class _RteBaseIE(InfoExtractor):
     _GEO_COUNTRIES = ['IE']
     _GEO_BYPASS = False
     _GEO_MSG = 'This video is only available in Ireland'
+
+    # RTE radio stations: URL slug and station id, as in https://www.rte.ie/radio/live_stations/json
+    _STATIONS = {
+        'radio1': (9, 'RTÉ Radio 1'),
+        '2fm': (1, 'RTÉ 2FM'),
+        'lyricfm': (16, 'RTÉ lyric fm'),
+        'rnag': (17, 'RTÉ Raidió na Gaeltachta'),
+        'gold': (22, 'RTÉ Gold'),
+    }
+
+    @classmethod
+    def _station_name(cls, slug=None, station_id=None):
+        """Station from RTE's own station id first; the URL's station slug is only a fallback."""
+        station_id = int_or_none(station_id)
+        by_id = next((name for sid, name in cls._STATIONS.values() if sid == station_id), None)
+        return by_id or traverse_obj(cls._STATIONS, (slug, 1))
+
+    @staticmethod
+    def _irish_timestamp(value):
+        """Timestamp from an RTE date string; strings without a time zone are Irish local time."""
+        if not value:
+            return None
+        if re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', value):
+            return unified_timestamp(value)
+        ts = unified_timestamp(value)  # parsed as if UTC
+        if ts is None:
+            return None
+        # Irish summer time (UTC+1) runs, as in the rest of the EU, from 01:00 UTC on the last
+        # Sunday of March to 01:00 UTC on the last Sunday of October
+        year = dt.datetime.fromtimestamp(ts, dt.timezone.utc).year
+
+        def last_sunday(month):
+            day = max(week[calendar.SUNDAY] for week in calendar.monthcalendar(year, month))
+            return calendar.timegm((year, month, day, 1, 0, 0))
+        utc_guess = ts - 3600
+        return utc_guess if last_sunday(3) <= utc_guess < last_sunday(10) else ts
+
+    @staticmethod
+    def _normalise_id(item_id):
+        item_id = str(item_id).strip().lower()
+        return str(int(item_id)) if item_id.isdigit() else item_id
 
 
 class _RteVideoBaseIE(_RteBaseIE):
@@ -212,3 +264,212 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
             OnDemandPagedList(lambda p: self._fetch_page(category, p), self._PAGE_SIZE),
             category or 'all', f'RTÉ video: {category or "all"}',
             uploader='RTÉ', channel='RTÉ')
+
+
+class RteClipIE(_RteBaseIE):
+    """Everything served by RTE's older lookup (rteavgen/getplaylist): one ID system, one extractor.
+
+    Radio clips and episodes, Bosco embeds (news articles) and numeric dustin embeds (RTE Archives)
+    all resolve to the same item ID, so they share one archive key.
+    """
+    IE_NAME = 'rte:clip'
+    IE_DESC = 'RTÉ radio clips and episodes, RTÉ News and RTÉ Archives videos'
+    _ID_RE = r'(?P<id>[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}|\d+)'
+    _VALID_URL = [
+        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/clips/{_ID_RE}',
+        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/[\w-]+/episodes/{_ID_RE}',
+        rf'https?://(?:www\.)?rte\.ie/bosco/components/player/iframe\.html\?(?:[^#]*&)?clipid={_ID_RE}(?:[&#]|$)',
+        r'https?://(?:www\.)?rte\.ie/media-embed/dustin/?\?(?:[^#]*&)?id=(?P<id>\d+)(?:[&#]|$)',
+    ]
+    _EMBED_REGEX = [
+        r'<iframe[^>]+?\b(?:data-)?src=["\'](?P<url>(?:https?:)?//(?:www\.)?rte\.ie/'
+        r'(?:bosco/components/player/iframe\.html|media-embed/dustin/?)\?[^"\']+)',
+    ]
+    _LOOKUP = 'https://www.rte.ie/rteavgen/getplaylist/'
+    _TESTS = [{
+        'url': 'https://www.rte.ie/radio/radio1/clips/13cf7b4f-b948-44e1-b609-b4ff00a04ccc/',
+        'info_dict': {
+            'id': '13cf7b4f-b948-44e1-b609-b4ff00a04ccc',
+            'ext': 'mp3',
+            'title': 'Charities processed 1m bags of unusable clothes last year',
+            'series': 'Morning Ireland',
+            'channel': 'RTÉ Radio 1',
+        },
+    }, {
+        'url': 'https://www.rte.ie/radio/radio1/clips/10507902/',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.rte.ie/radio/radio1/morning-ireland/episodes/37750aa0-ae57-4857-86e3-b4f900975b80/',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.rte.ie/bosco/components/player/iframe.html?clipid=22640012&autostart=false&app=true',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.rte.ie/media-embed/dustin/?id=11673745',
+        'only_matching': True,
+    }]
+
+    def _real_extract(self, url):
+        mobj = self._match_valid_url(url).groupdict()
+        item_id = self._normalise_id(mobj['id'])
+        # RTE answers unknown or expired items with HTTP 404 and an explanation in the JSON body
+        data = self._download_json(
+            self._LOOKUP, item_id, query={'type': 'web', 'format': 'json', 'id': item_id},
+            expected_status=404)
+        show = traverse_obj(data, ('shows', 0, {dict}))
+        if not show:
+            message = unescapeHTML(traverse_obj(data, ('message', {str})))
+            raise ExtractorError(
+                f'RTÉ said: {message}' if message else 'Item not found', expected=True, video_id=item_id)
+
+        media = traverse_obj(show, ('media:group', 0, {dict})) or {}
+        medium = show.get('medium') or media.get('medium')
+        if str(media.get('iscopyprotected')).lower() == 'true':
+            self.report_drm(item_id)
+
+        formats = []
+        hls_url = url_or_none(f'{media.get("hls_server") or ""}{media.get("hls_url") or ""}')
+        if hls_url:
+            fmts = self._extract_m3u8_formats(hls_url, item_id, 'mp4', m3u8_id='hls', fatal=False)
+            if medium == 'audio':
+                for f in fmts:
+                    if not f.get('vcodec') or f['vcodec'] == 'unknown':
+                        f['vcodec'] = 'none'
+            formats.extend(fmts)
+        mp3_url = url_or_none(show.get('url'))
+        if mp3_url and urllib.parse.urlparse(mp3_url).path.lower().endswith('.mp3'):
+            formats.append({
+                'url': mp3_url, 'format_id': 'mp3', 'ext': 'mp3',
+                'vcodec': 'none', 'acodec': 'mp3',
+            })
+        if not formats:
+            raise ExtractorError('No playable stream found', expected=True, video_id=item_id)
+
+        station = self._station_name(mobj.get('station'), show.get('channelid'))
+        uploader = unescapeHTML(show.get('channel'))
+        if not uploader or uploader == 'WEB Exclusive':
+            uploader = unescapeHTML(show.get('provider')) or 'RTÉ'
+        timestamp = self._irish_timestamp(show.get('published'))
+        is_episode = '/episodes/' in url
+        genre = unescapeHTML(show.get('genre'))
+        return {
+            'id': item_id,
+            'title': unescapeHTML(show.get('title')),
+            'description': unescapeHTML(show.get('description')) or None,
+            'duration': float_or_none(show.get('duration'), 1000),
+            'timestamp': timestamp,
+            'release_timestamp': timestamp if is_episode else None,
+            'thumbnail': url_or_none(show.get('thumbnail')),
+            'uploader': uploader,
+            'channel': station or uploader,
+            'series': unescapeHTML(show.get('series')) or None,
+            'categories': [genre] if genre else None,
+            'media_type': 'episode' if is_episode else 'clip' if '/clips/' in url else None,
+            'formats': formats,
+        }
+
+
+class RteArchivesIE(_RteBaseIE):
+    IE_NAME = 'rte:archives'
+    IE_DESC = 'RTÉ Archives pages (rte.ie/archives)'
+    _VALID_URL = r'https?://(?:www\.)?rte\.ie/archives/\d{4}/\d{4}/(?P<id>\d+)-[\w-]+'
+    _TESTS = [{
+        'url': 'https://www.rte.ie/archives/2016/0608/794170-21st-cork-film-festival/',
+        'info_dict': {
+            'id': '10578396',
+            'ext': 'mp4',
+            'title': '21st Cork Film Festival',
+            'release_date': '19760611',
+        },
+    }]
+
+    def _release_date(self, webpage):
+        """The clip's own date is the last 'broadcast on <date>' in the caption, checked against
+        the page's year tag. If they disagree, only the year is trusted."""
+        year = int_or_none(self._search_regex(
+            r'<span[^>]+class="date_tag"[^>]*>\s*(\d{4})', webpage, 'year', default=None))
+        text = unescapeHTML(re.sub(r'<[^>]+>', ' ', webpage))
+        dates = re.findall(
+            r'broadcast on (\d{1,2}(?:st|nd|rd|th)? (?:January|February|March|April|May|June|July|'
+            r'August|September|October|November|December) \d{4})', text)
+        date = unified_strdate(re.sub(r'(?<=\d)(?:st|nd|rd|th)\b', '', dates[-1])) if dates else None
+        if date and (not year or int(date[:4]) == year):
+            return {'release_date': date}
+        return {'release_year': year} if year else {}
+
+    def _real_extract(self, url):
+        page_id = self._match_id(url)
+        webpage = self._download_webpage(url, page_id)
+        embeds = [*RteClipIE._extract_embed_urls(url, webpage), *RteVideoIE._extract_embed_urls(url, webpage)]
+        embeds = list(dict.fromkeys(embeds))
+        if not embeds:
+            raise ExtractorError('No video found on this page', expected=True)
+
+        keywords = self._html_search_meta('keywords', webpage, default=None)
+        page_info = {
+            'title': self._og_search_title(webpage, default=None),
+            'description': self._og_search_description(webpage, default=None),
+            'tags': [k.strip() for k in keywords.split(',') if k.strip()] if keywords else None,
+            'uploader': 'RTÉ Archives',
+            'channel': 'RTÉ Archives',
+        }
+        if len(embeds) == 1:
+            return self.url_result(
+                embeds[0], url_transparent=True, **page_info, **self._release_date(webpage))
+        return self.playlist_result(
+            [self.url_result(e) for e in embeds], page_id, page_info['title'],
+            page_info['description'], uploader='RTÉ Archives', channel='RTÉ Archives')
+
+
+class RteRadioProgrammeIE(_RteBaseIE):
+    IE_NAME = 'rte:radio:programme'
+    IE_DESC = 'RTÉ radio programme pages: all episodes, newest first'
+    _VALID_URL = r'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/(?P<id>(?!clips(?:[/?#]|$))[\w-]+)(?:/episodes)?/?(?:[?#]|$)'
+    _PAGE_SIZE = 100  # fixed by RTE's episodes/json endpoint
+    _TESTS = [{
+        'url': 'https://www.rte.ie/radio/radio1/morning-ireland/',
+        'info_dict': {'id': 'morning-ireland', 'title': 'Morning Ireland'},
+        'playlist_mincount': 100,
+    }, {
+        'url': 'https://www.rte.ie/radio/radio1/morning-ireland/episodes/',
+        'only_matching': True,
+    }]
+
+    def _fetch_page(self, station, programme, page):
+        data = self._download_json(
+            f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
+            f'Downloading episodes page {page + 1}', query={'page': page + 1}, fatal=page > 0)
+        channel = self._station_name(station)
+        for ep in traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))):
+            ep_id = self._normalise_id(ep.get('id') or ep['itemid'])
+            ep_url = urllib.parse.urljoin('https://www.rte.ie/', ep.get('url') or '') if ep.get('url') else None
+            if not ep_url or not RteClipIE.suitable(ep_url):
+                ep_url = f'https://www.rte.ie/radio/{station}/{programme}/episodes/{ep_id}/'
+            timestamp = self._irish_timestamp(ep.get('published')) or int_or_none(ep.get('BroadcastDateUnixTime')) or None
+            yield self.url_result(
+                ep_url, RteClipIE, ep_id, unescapeHTML(ep.get('title')),
+                timestamp=timestamp, release_timestamp=timestamp,
+                duration=float_or_none(ep.get('duration'), 1000),
+                series=unescapeHTML(ep.get('programme_title')) or None,
+                channel=channel, media_type='episode')
+
+    def _real_extract(self, url):
+        station, programme = self._match_valid_url(url).group('station', 'id')
+        first = self._download_json(
+            f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
+            'Checking programme', query={'page': 1}, fatal=False)
+        if not traverse_obj(first, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))):
+            raise ExtractorError('Not an RTÉ radio programme page (no episodes found)', expected=True)
+        webpage = self._download_webpage(
+            f'https://www.rte.ie/radio/{station}/{programme}/', programme, fatal=False) or ''
+        json_ld = list(self._yield_json_ld(webpage, programme, fatal=False))
+        show = traverse_obj(json_ld, (lambda _, v: v.get('@type') == 'Show', any)) or {}
+        title = (unescapeHTML(show.get('name'))
+                 or self._html_search_meta('twitter:title', webpage, default=None)
+                 or traverse_obj(first, ('programmes', 0, 'programme_title')) or programme)
+        channel = self._station_name(station)
+        return self.playlist_result(
+            OnDemandPagedList(lambda p: self._fetch_page(station, programme, p), self._PAGE_SIZE),
+            programme, title,
+            unescapeHTML(show.get('description')) or self._og_search_description(webpage, default=None),
+            thumbnail=url_or_none(show.get('image')), uploader=channel, channel=channel)
