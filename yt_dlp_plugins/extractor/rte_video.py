@@ -1,17 +1,18 @@
 """
-yt-dlp plugin: RTE video clips (rte.ie/video) and category listings.
+yt-dlp plugin: DRM-free video and audio from rte.ie.
 
-Install: <plugins dir>/rte-video/yt_dlp_plugins/extractor/rte_video.py
-  e.g. ~/.config/yt-dlp/plugins/rte-video/yt_dlp_plugins/extractor/rte_video.py
+Install: <plugins dir>/yt-dlp-rte-video/yt_dlp_plugins/extractor/rte_video.py
+  e.g. ~/.yt-dlp/plugins/yt-dlp-rte-video/yt_dlp_plugins/extractor/rte_video.py
 
 Supported URLs
-  https://www.rte.ie/video/id/38228/                     single clip
-  https://www.rte.ie/media-embed/dustin/?id=vKr_UGcLUBDF  embedded clip
-  https://www.rte.ie/video/category/News/                category playlist
-  https://www.rte.ie/video/                              everything on rte.ie/video
+  https://www.rte.ie/video/id/38228/                     rte.ie/video clip
+  https://www.rte.ie/video/category/News/                rte.ie/video category (playlist)
+  https://www.rte.ie/video/                              all of rte.ie/video (playlist)
 
-Items the feed marks as DRM-protected are reported as DRM and not downloaded.
-RTE Player (/player/...) episodes are DRM-protected and are not handled here.
+Items RTE marks as DRM-protected are reported as DRM and not downloaded.
+RTE Player (/player/...) and live TV use DRM and are not supported.
+Geo-restriction is handled like yt-dlp's SVT extractor: Ireland is named in the
+error, and no fake IP is sent unless the user asks for it with --xff.
 """
 import base64
 
@@ -27,7 +28,15 @@ from yt_dlp.utils import (
 from yt_dlp.utils.traversal import traverse_obj
 
 
-class _RteVideoBaseIE(InfoExtractor):
+class _RteBaseIE(InfoExtractor):
+    # Geo-restriction handled like yt-dlp's SVT extractor (svt.py): Ireland named in errors,
+    # no automatic X-Forwarded-For fake IP (users can still opt in with --xff).
+    _GEO_COUNTRIES = ['IE']
+    _GEO_BYPASS = False
+    _GEO_MSG = 'This video is only available in Ireland'
+
+
+class _RteVideoBaseIE(_RteBaseIE):
     # Values from the config of RTE's embed player (www.rte.ie/media-embed/dustin/main-*.js):
     # DUSTINP_ENTERTAINMENT_FEED, DUSTIN_PID_LOOKUP, DUSTIN_APP_RTE_SL_ANON_LOGIN_URL,
     # DUSTIN_APP_CONTENT_PROTECTION_ACCOUNT
@@ -38,11 +47,13 @@ class _RteVideoBaseIE(InfoExtractor):
     _GUID_PREFIX = 'epic-mpx-manual-'
     _FIELDS = ','.join((
         'guid', 'title', 'plprogram$longDescription', 'plprogram$runtime', 'plprogram$tags',
-        'rte$broadcastDate', 'rte$defaultThumbnail',
+        'plprogram$programType', 'plprogram$ratings',
+        'rte$broadcastDate', 'rte$defaultThumbnail', 'rte$licenceGeos',
         'plprogramavailability$media.plmedia$publicUrl',
         'plprogramavailability$media.media$content.plfile$format',
         'plprogramavailability$media.media$content.plfile$isProtected',
     ))
+    _IGNORED_TAGS = ('notSearchable', 'noAds')
     _auth_header = None
 
     def _query_feed(self, video_id, query, note='Downloading feed'):
@@ -57,11 +68,18 @@ class _RteVideoBaseIE(InfoExtractor):
                 f'{self._MPX_ACCOUNT}:{token}'.encode()).decode()
         return _RteVideoBaseIE._auth_header
 
-    def _video_id(self, guid):
-        return guid[len(self._GUID_PREFIX):] if guid.startswith(self._GUID_PREFIX) else guid
+    @classmethod
+    def _video_id(cls, guid):
+        if guid.startswith(cls._GUID_PREFIX):
+            return guid[len(cls._GUID_PREFIX):]
+        # Guard: a non-rte.ie/video ID that is all digits must never equal a stripped rte.ie/video number
+        return f'mpx-{guid}' if guid.isdigit() else guid
 
     def _entry_metadata(self, entry):
-        tags = traverse_obj(entry, ('plprogram$tags', ..., 'plprogram$title', {str}))
+        tags = traverse_obj(entry, ('plprogram$tags', lambda _, v: v['plprogram$title']))
+        categories = [t['plprogram$title'] for t in tags if t.get('plprogram$scheme') in ('epic', 'category')]
+        other_tags = [t['plprogram$title'] for t in tags if t.get('plprogram$scheme') not in ('epic', 'category', 'subCategory')]
+        rating = traverse_obj(entry, ('plprogram$ratings', ..., 'plprogram$rating', {str}, any))
         return {
             'id': self._video_id(entry['guid']),
             'display_id': entry['guid'],
@@ -70,7 +88,13 @@ class _RteVideoBaseIE(InfoExtractor):
             'duration': float_or_none(entry.get('plprogram$runtime')),
             'timestamp': int_or_none(entry.get('rte$broadcastDate'), 1000),
             'thumbnail': url_or_none(entry.get('rte$defaultThumbnail')),
-            'tags': [t for t in tags if t not in ('notSearchable', 'noAds')],
+            'uploader': 'RTÉ',
+            'channel': 'RTÉ',
+            'categories': [c for c in categories if c not in self._IGNORED_TAGS] or None,
+            'tags': [t for t in other_tags if t not in self._IGNORED_TAGS] or None,
+            'media_type': entry.get('plprogram$programType'),
+            'age_limit': 0 if rating == 'GA' else None,
+            'rte_licence': entry.get('rte$licenceGeos'),
         }
 
     def _extract_entry(self, entry):
@@ -89,10 +113,15 @@ class _RteVideoBaseIE(InfoExtractor):
             public_url, video_id, 'Downloading SMIL',
             headers={'Authorization': self._get_auth_header(video_id)},
             query={'formats': 'm3u', 'format': 'smil'})
+        exception = self._search_regex(
+            (r'<param[^>]+name="exception"[^>]+value="([^"]+)"', r'exception="([^"]+)"'),
+            smil, 'exception', default=None)
+        if exception == 'GeoLocationBlocked':
+            self.raise_geo_restricted(self._GEO_MSG, countries=self._GEO_COUNTRIES, metadata_available=True)
+            return info
         src = url_or_none(unescapeHTML(self._search_regex(
             r'<video[^>]+src="([^"]+)"', smil, 'stream URL', default=None)))
         if not src or '/errorFiles/' in src:
-            exception = self._search_regex(r'exception="([^"]+)"', smil, 'exception', default=None)
             raise ExtractorError(
                 'No playable stream' + (f' ({exception})' if exception else ' (not yet published?)'),
                 expected=True)
@@ -106,8 +135,10 @@ class RteVideoIE(_RteVideoBaseIE):
     IE_DESC = 'RTÉ video clips (rte.ie/video)'
     _VALID_URL = [
         r'https?://(?:www\.)?rte\.ie/video/id/(?P<id>\d+)',
-        r'https?://(?:www\.)?rte\.ie/media-embed/dustin/?\?(?:[^#]*&)?id=(?P<pid>[\w-]+)',
+        # dustin embed with a thePlatform ID (contains a non-digit); numeric IDs belong to the older lookup
+        r'https?://(?:www\.)?rte\.ie/media-embed/dustin/?\?(?:[^#]*&)?id=(?P<pid>[\w-]*[A-Za-z_-][\w-]*)',
     ]
+    _EMBED_REGEX = [r'<iframe[^>]+?\bsrc=["\'](?P<url>(?:https?:)?//(?:www\.)?rte\.ie/media-embed/dustin/?\?[^"\']+)']
     _TESTS = [{
         'url': 'https://www.rte.ie/video/id/38228/',
         'info_dict': {
@@ -179,4 +210,5 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
         category = self._match_id(url)
         return self.playlist_result(
             OnDemandPagedList(lambda p: self._fetch_page(category, p), self._PAGE_SIZE),
-            category or 'all', f'RTÉ video: {category or "all"}')
+            category or 'all', f'RTÉ video: {category or "all"}',
+            uploader='RTÉ', channel='RTÉ')
