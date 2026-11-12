@@ -549,8 +549,8 @@ class RteArchivesIE(_RteBaseIE):
 
 class RteRadioProgrammeIE(_RteBaseIE):
     IE_NAME = 'rte:radio:programme'
-    IE_DESC = 'RTÉ radio programme pages: all episodes (or clips), newest first'
-    _VALID_URL = r'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/(?P<id>(?!clips(?:[/?#]|$))[\w-]+)(?:/episodes)?/?(?:[?#]|$)'
+    IE_DESC = 'RTÉ radio programme pages: all episodes (or, for <programme>/clips/, all clips), newest first'
+    _VALID_URL = r'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/(?P<id>(?!clips(?:[/?#]|$))[\w-]+)(?:/(?P<kind>episodes|clips))?/?(?:[?#]|$)'
     _PAGE_SIZE = 100  # fixed by RTE's episodes/json and clips/json endpoints
     _TESTS = [{
         'url': 'https://www.rte.ie/radio/radio1/morning-ireland/',
@@ -559,10 +559,14 @@ class RteRadioProgrammeIE(_RteBaseIE):
     }, {
         'url': 'https://www.rte.ie/radio/radio1/morning-ireland/episodes/',
         'only_matching': True,
+    }, {
+        'url': 'https://www.rte.ie/radio/rnag/iris-aniar/clips/',
+        'only_matching': True,
     }]
 
     def _list_page(self, station, programme, kind, page):
-        """One page of RTE's episodes/json or clips/json; None at the end of the list.
+        """One page of RTE's episode or clip list (the data behind <programme>/episodes/ and
+        <programme>/clips/); None at the end.
 
         RTE's num_pages/total_items are unreliable; the list ends with a short page or,
         when the last page is exactly full, with HTTP 404 for the next one."""
@@ -578,14 +582,12 @@ class RteRadioProgrammeIE(_RteBaseIE):
         return (self._irish_timestamp(item.get('published'))
                 or (lambda t: t if t and t > 0 else None)(int_or_none(item.get('BroadcastDateUnixTime'))))
 
-    def _entry(self, item, station, programme, kind, **extra):
+    def _entry(self, item, station, programme, kind):
         item_id = self._normalise_id(item.get('id') or item['itemid'])
-        if kind == 'clips':
-            item_url = f'https://www.rte.ie/radio/{station}/clips/{item_id}/'
-        else:
-            item_url = f'https://www.rte.ie/radio/{station}/{programme}/episodes/{item_id}/'
         timestamp = self._item_timestamp(item)
         is_episode = kind == 'episodes'
+        item_url = (f'https://www.rte.ie/radio/{station}/{programme}/episodes/{item_id}/' if is_episode
+                    else f'https://www.rte.ie/radio/{station}/clips/{item_id}/')
         return self.url_result(
             item_url, RteClipIE, item_id, self._clean_title(item.get('title')),
             timestamp=timestamp, upload_date=self._utc_date(timestamp),
@@ -595,7 +597,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
             duration=None if item_id.isdigit() else float_or_none(item.get('duration'), 1000),
             series=self._clean_title(item.get('programme_title')),
             channel=self._station_name(station, item.get('channelid')),
-            media_type='episode' if is_episode else 'clip', **extra)
+            media_type='episode' if is_episode else 'clip')
 
     def _fill_gap(self, station, programme, newer, older, seen):
         # EXPERIMENTAL, off by default (enable with --extractor-args "rteradioprogramme:fill_gaps=yes").
@@ -729,42 +731,28 @@ class RteRadioProgrammeIE(_RteBaseIE):
                 return
             previous = items
 
-    def _page_link_entries(self, webpage, station, programme):
-        """Last resort: episode and clip links on the programme page itself (no dates)."""
-        seen = set()
-        for path in re.findall(
-                rf'href="(?:https?://www\.rte\.ie)?(/radio/[\w-]+/(?:{re.escape(programme)}/episodes|clips)/[\da-fA-F-]{{4,}}/)"',
-                webpage):
-            item_url = f'https://www.rte.ie{path}'
-            mobj = RteClipIE._match_valid_url(item_url)
-            if not mobj or path in seen:
-                continue
-            seen.add(path)
-            yield self.url_result(item_url, RteClipIE, self._normalise_id(mobj.group('id')),
-                                  media_type='episode' if '/episodes/' in path else 'clip')
-
     def _real_extract(self, url):
-        station, programme = (s.lower() for s in self._match_valid_url(url).group('station', 'id'))
+        mobj = self._match_valid_url(url)
+        station, programme = (s.lower() for s in mobj.group('station', 'id'))
+        kind = mobj.group('kind') or 'episodes'
         webpage = self._download_webpage(
             f'https://www.rte.ie/radio/{station}/{programme}/', programme, fatal=False) or ''
         json_ld = list(self._yield_json_ld(webpage, programme, fatal=False))
         show = traverse_obj(json_ld, (lambda _, v: v.get('@type') == 'Show', any)) or {}
 
-        # Episodes; for clip-only programmes, clips; failing both, the page's own links
-        kind, first = 'episodes', self._list_page(station, programme, 'episodes', 1)
+        # One source per URL: RTE's list behind <programme>/episodes/ (also used for the programme
+        # page itself) or behind <programme>/clips/; nothing else is tried
+        first = self._list_page(station, programme, kind, 1)
         if not first:
-            kind, first = 'clips', self._list_page(station, programme, 'clips', 1)
-        if first:
-            entries = self._entries(station, programme, kind, first)
-        else:
-            entries = list(self._page_link_entries(webpage, station, programme))
-            if not entries:
-                raise ExtractorError('Not an RTÉ radio programme page (no episodes found)', expected=True)
+            raise ExtractorError(f'RTÉ has no {kind[:-1]} list for this programme', expected=True)
+        entries = self._entries(station, programme, kind, first)
 
         title = (self._clean_title(show.get('name'))
                  or self._html_search_meta('twitter:title', webpage, default=None)
                  or self._clean_title(traverse_obj(first, (0, 'programme_title'))) or programme)
         channel = self._station_name(station, traverse_obj(first, (0, 'channelid')))
+        if kind == 'clips':
+            programme, title = f'{programme}-clips', f'{title} (clips)'
         return self.playlist_result(
             entries, programme, title,
             unescapeHTML(show.get('description')) or self._og_search_description(webpage, default=None),
