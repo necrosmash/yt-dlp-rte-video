@@ -37,6 +37,7 @@ from yt_dlp.utils import (
     ExtractorError,
     float_or_none,
     int_or_none,
+    str_or_none,
     unescapeHTML,
     unified_strdate,
     unified_timestamp,
@@ -433,18 +434,21 @@ class RteAvgenIE(_RteBaseIE):
         timestamp = self._irish_timestamp(show.get('published'))
         title = self._clean_title(show.get('title'))
 
-        # Episode or clip: the URL says so on radio pages; otherwise RTE's data does. Only items
-        # of a radio station count as broadcast episodes (archive audio has no station, and its
-        # published date is its upload date, not a broadcast date)
-        if '/episodes/' in url:
-            media_type = 'episode'
-        elif '/clips/' in url:
+        # Episode or clip, from RTE's data, not the URL (RTE's own share links use /clips/ URLs
+        # for full episodes). A clip of an episode names its parent in episode_id; older numeric
+        # items have form long (episode) or short (clip). Only radio-station audio can be a
+        # broadcast episode (archive audio has no station; its published date is an upload date).
+        episode_id, form = str_or_none(show.get('episode_id')), show.get('form')
+        if medium != 'audio' or not self._station_slug(show.get('channelid')):
             media_type = 'clip'
-        elif (medium == 'audio' and self._station_slug(show.get('channelid'))
-              and (show.get('form') == 'long' or show.get('episode_id') == show.get('itemid'))):
-            media_type = 'episode'
+        elif episode_id and episode_id != str_or_none(show.get('itemid')):
+            media_type = 'clip'
+        elif form in ('long', 'short'):
+            media_type = 'episode' if form == 'long' else 'clip'
+        elif not item_id.isdigit():
+            media_type = 'episode'  # UUID item that is not part of another episode
         else:
-            media_type = 'clip'
+            media_type = 'episode' if '/episodes/' in url else 'clip'
 
         description = unescapeHTML(show.get('description')) or None
         series = self._clean_title(show.get('series'))
