@@ -18,18 +18,23 @@ Items RTE marks as DRM-protected are reported as DRM and not downloaded.
 RTE Player (/player/...) and live TV use DRM and are not supported.
 Geo-restriction is handled like yt-dlp's SVT extractor: Ireland is named in the
 error, and no fake IP is sent unless the user asks for it with --xff.
+
+Experimental: radio programme playlists fill gaps in RTE's own episode list
+(see RteRadioProgrammeIE._fill_gap). Disable with
+  --extractor-args "rteradioprogramme:fill_gaps=no"
 """
 import base64
 import calendar
 import datetime as dt
+import itertools
 import re
+import statistics
 import urllib.parse
 
 from yt_dlp.extractor.common import InfoExtractor
 from yt_dlp.networking.exceptions import HTTPError
 from yt_dlp.utils import (
     ExtractorError,
-    OnDemandPagedList,
     float_or_none,
     int_or_none,
     unescapeHTML,
@@ -61,27 +66,45 @@ class _RteBaseIE(InfoExtractor):
         """Station from RTE's own station id first; the URL's station slug is only a fallback."""
         station_id = int_or_none(station_id)
         by_id = next((name for sid, name in cls._STATIONS.values() if sid == station_id), None)
-        return by_id or traverse_obj(cls._STATIONS, (slug, 1))
+        return by_id or traverse_obj(cls._STATIONS, ((slug or '').lower(), 1))
+
+    @classmethod
+    def _station_slug(cls, station_id):
+        station_id = int_or_none(station_id)
+        return next((slug for slug, (sid, _) in cls._STATIONS.items() if sid == station_id), None)
 
     @staticmethod
-    def _irish_timestamp(value):
-        """Timestamp from an RTE date string; strings without a time zone are Irish local time."""
-        if not value:
-            return None
-        if re.search(r'(?:Z|[+-]\d{2}:?\d{2})$', value):
-            return unified_timestamp(value)
-        ts = unified_timestamp(value)  # parsed as if UTC
-        if ts is None:
-            return None
-        # Irish summer time (UTC+1) runs, as in the rest of the EU, from 01:00 UTC on the last
-        # Sunday of March to 01:00 UTC on the last Sunday of October
-        year = dt.datetime.fromtimestamp(ts, dt.timezone.utc).year
-
+    def _summer_time(year):
+        """Irish summer time (UTC+1): EU rule, 01:00 UTC last Sunday of March to last Sunday of October."""
         def last_sunday(month):
             day = max(week[calendar.SUNDAY] for week in calendar.monthcalendar(year, month))
             return calendar.timegm((year, month, day, 1, 0, 0))
-        utc_guess = ts - 3600
-        return utc_guess if last_sunday(3) <= utc_guess < last_sunday(10) else ts
+        return last_sunday(3), last_sunday(10)
+
+    @classmethod
+    def _irish_timestamp(cls, value):
+        """Timestamp from an RTE date string. Strings with a UTC marker or offset are taken as such;
+        strings without one (or marked IST) are Irish local time."""
+        if not value or not isinstance(value, str):
+            return None
+        value = value.strip()
+        if re.search(r'(?:Z|[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT))$', value):
+            ts = unified_timestamp(value)
+        else:
+            ts = unified_timestamp(re.sub(r'\s*\bIST$', '', value))  # parsed as if UTC
+            if ts is not None:
+                start, end = cls._summer_time(dt.datetime.fromtimestamp(ts, dt.timezone.utc).year)
+                if start <= ts - 3600 < end:
+                    ts -= 3600
+        # RTE uses 0001-01-01 and similar as "no date"
+        return ts if ts is not None and ts > 0 else None
+
+    @classmethod
+    def _irish_local(cls, timestamp):
+        """Irish local wall-clock time (naive datetime) for a UTC timestamp."""
+        start, end = cls._summer_time(dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).year)
+        offset = 3600 if start <= timestamp < end else 0
+        return dt.datetime.fromtimestamp(timestamp + offset, dt.timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     def _utc_date(timestamp):
@@ -97,6 +120,26 @@ class _RteBaseIE(InfoExtractor):
     def _normalise_id(item_id):
         item_id = str(item_id).strip().lower()
         return str(int(item_id)) if item_id.isdigit() else item_id
+
+    @staticmethod
+    def _clean_title(title):
+        title = unescapeHTML(title)
+        if not isinstance(title, str):
+            return None
+        return re.sub(r'\s+', ' ', title.replace('\x00', ' ')).strip() or None
+
+    def _download_json_retry(self, url, video_id, note, query=None, *, end_statuses=(404,)):
+        """JSON with yt-dlp's --extractor-retries for transient errors. Returns None for HTTP
+        statuses that mean "no more data" (end_statuses); other HTTP errors are raised at once."""
+        for retry in self.RetryManager():
+            try:
+                return self._download_json(url, video_id, note, query=query)
+            except ExtractorError as e:
+                if isinstance(e.cause, HTTPError):
+                    if e.cause.status in end_statuses:
+                        return None
+                    raise
+                retry.error = e
 
 
 class _RteVideoBaseIE(_RteBaseIE):
@@ -120,8 +163,8 @@ class _RteVideoBaseIE(_RteBaseIE):
     _auth_header = None
 
     def _query_feed(self, video_id, query, note='Downloading feed'):
-        return self._download_json(self._FEED, video_id, note, query={
-            'fields': self._FIELDS, **query})
+        return self._download_json_retry(
+            self._FEED, video_id, note, query={'fields': self._FIELDS, **query}, end_statuses=())
 
     def _get_auth_header(self, video_id):
         if not _RteVideoBaseIE._auth_header:
@@ -146,7 +189,7 @@ class _RteVideoBaseIE(_RteBaseIE):
         return {
             'id': self._video_id(entry['guid']),
             'display_id': entry['guid'],
-            'title': unescapeHTML(entry.get('title')),
+            'title': self._clean_title(entry.get('title')),
             'description': unescapeHTML(entry.get('plprogram$longDescription')) or None,
             'duration': float_or_none(entry.get('plprogram$runtime')),
             'timestamp': int_or_none(entry.get('rte$broadcastDate'), 1000),
@@ -155,7 +198,7 @@ class _RteVideoBaseIE(_RteBaseIE):
             'channel': 'RTÉ',
             'categories': [c for c in categories if c not in self._IGNORED_TAGS] or None,
             'tags': [t for t in other_tags if t not in self._IGNORED_TAGS] or None,
-            'media_type': entry.get('plprogram$programType'),
+            'media_type': entry.get('plprogram$programType') or 'clip',
             'age_limit': 0 if rating == 'GA' else None,
             'rte_licence': entry.get('rte$licenceGeos'),
         }
@@ -241,40 +284,53 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
     _MAX_ITEMS = 1000  # the feed rejects ranges beyond this with HTTP 400
     _TESTS = [{
         'url': 'https://www.rte.ie/video/category/News/',
-        'info_dict': {'id': 'News', 'title': 'RTÉ video: News'},
+        'info_dict': {'id': 'news', 'title': 'RTÉ video: News'},
         'playlist_mincount': 10,
     }, {
         'url': 'https://www.rte.ie/video/',
         'only_matching': True,
     }]
 
-    def _fetch_page(self, category, page):
-        start = page * self._PAGE_SIZE + 1
-        if start > self._MAX_ITEMS:
-            return
-        query = {
-            'byProgramType': 'clip',
-            'sort': 'rte$broadcastDate|desc',
-            'range': f'{start}-{start + self._PAGE_SIZE - 1}',
-        }
-        if category:
-            query['byTags'] = f'epic:{category}'
-        data = self._query_feed(category or 'all', query, f'Downloading page {page + 1}')
-        for entry in traverse_obj(data, ('entries', lambda _, v: v['guid'])):
-            # Only items rte.ie/video itself lists, not RTE Player clips sharing the tag
-            if not entry['guid'].startswith(self._GUID_PREFIX):
-                continue
-            info = self._entry_metadata(entry)
-            yield self.url_result(
-                f'https://www.rte.ie/video/id/{info["id"]}/', RteVideoIE, info['id'],
-                upload_date=self._utc_date(info['timestamp']),
-                **{k: v for k, v in info.items() if k not in ('id', 'display_id')})
+    def _entries(self, category):
+        seen = set()
+        for page in itertools.count():
+            start = page * self._PAGE_SIZE + 1
+            if start > self._MAX_ITEMS:
+                return
+            query = {
+                'byProgramType': 'clip',
+                'sort': 'rte$broadcastDate|desc',
+                'range': f'{start}-{start + self._PAGE_SIZE - 1}',
+            }
+            if category:
+                query['byTags'] = f'epic:{category}'
+            data = self._query_feed(category or 'all', query, f'Downloading page {page + 1}')
+            raw = traverse_obj(data, ('entries', ..., {dict}))
+            for entry in raw:
+                guid = entry.get('guid')
+                # Only items rte.ie/video itself lists, not RTE Player clips sharing the feed
+                if not isinstance(guid, str) or not guid.startswith(self._GUID_PREFIX):
+                    continue
+                info = self._entry_metadata(entry)
+                if info['id'] in seen:  # the feed can shift while it is being paged
+                    continue
+                seen.add(info['id'])
+                yield self.url_result(
+                    f'https://www.rte.ie/video/id/{info["id"]}/', RteVideoIE, info['id'],
+                    upload_date=self._utc_date(info['timestamp']),
+                    **{k: v for k, v in info.items() if k not in ('id', 'display_id')})
+            # The end is decided by the feed's own page size, before filtering
+            if len(raw) < self._PAGE_SIZE:
+                return
 
     def _real_extract(self, url):
         category = self._match_id(url)
+        page_url = f'https://www.rte.ie/video/category/{category}/' if category else 'https://www.rte.ie/video/'
+        webpage = self._download_webpage(page_url, category or 'all', 'Downloading category page', fatal=False) or ''
+        name = category[:1].upper() + category[1:] if category else 'all'
         return self.playlist_result(
-            OnDemandPagedList(lambda p: self._fetch_page(category, p), self._PAGE_SIZE),
-            category or 'all', f'RTÉ video: {category or "all"}',
+            self._entries(category), (category or 'all').lower(), f'RTÉ video: {name}',
+            thumbnail=self._og_search_thumbnail(webpage, default=None),
             uploader='RTÉ', channel='RTÉ')
 
 
@@ -286,12 +342,13 @@ class RteClipIE(_RteBaseIE):
     """
     IE_NAME = 'rte:clip'
     IE_DESC = 'RTÉ radio clips and episodes, RTÉ News and RTÉ Archives videos'
-    _ID_RE = r'(?P<id>[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}|\d+)'
+    # Numeric item IDs have at least 4 digits; small numbers are live-station ids (live player embeds)
+    _ID_RE = r'(?P<id>[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}|\d{4,})'
     _VALID_URL = [
-        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/clips/{_ID_RE}',
-        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/[\w-]+/episodes/{_ID_RE}',
+        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/clips/{_ID_RE}/?(?:[?#]|$)',
+        rf'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/[\w-]+/episodes/{_ID_RE}/?(?:[?#]|$)',
         rf'https?://(?:www\.)?rte\.ie/bosco/components/player/iframe\.html\?(?:[^#]*&)?clipid={_ID_RE}(?:[&#]|$)',
-        r'https?://(?:www\.)?rte\.ie/media-embed/dustin/?\?(?:[^#]*&)?id=(?P<id>\d+)(?:[&#]|$)',
+        r'https?://(?:www\.)?rte\.ie/media-embed/dustin/?\?(?:[^#]*&)?id=(?P<id>\d{4,})(?:[&#]|$)',
     ]
     _EMBED_REGEX = [
         r'<iframe[^>]+?\b(?:data-)?src=["\'](?P<url>(?:https?:)?//(?:www\.)?rte\.ie/'
@@ -321,28 +378,37 @@ class RteClipIE(_RteBaseIE):
         'only_matching': True,
     }]
 
-    def _real_extract(self, url):
-        mobj = self._match_valid_url(url).groupdict()
-        item_id = self._normalise_id(mobj['id'])
+    def _lookup(self, item_id, *, note=None, fatal=True):
+        """One item from the older lookup; None (or an error) if RTE doesn't have it."""
         # RTE answers unknown or expired items with HTTP 404 and an explanation in the JSON body
         data = self._download_json(
-            self._LOOKUP, item_id, query={'type': 'web', 'format': 'json', 'id': item_id},
-            expected_status=404)
+            self._LOOKUP, item_id, note=note, query={'type': 'web', 'format': 'json', 'id': item_id},
+            expected_status=404, fatal=fatal) or {}
         show = traverse_obj(data, ('shows', 0, {dict}))
-        if not show:
+        if not show and fatal:
             message = unescapeHTML(traverse_obj(data, ('message', {str})))
             raise ExtractorError(
                 f'RTÉ said: {message}' if message else 'Item not found', expected=True, video_id=item_id)
+        return show
 
+    @staticmethod
+    def _medium(show):
+        return show.get('medium') or traverse_obj(show, ('media:group', 0, 'medium', {str}))
+
+    def _real_extract(self, url):
+        mobj = self._match_valid_url(url).groupdict()
+        item_id = self._normalise_id(mobj['id'])
+        show = self._lookup(item_id)
         media = traverse_obj(show, ('media:group', 0, {dict})) or {}
-        medium = show.get('medium') or media.get('medium')
+        medium = self._medium(show)
         if str(media.get('iscopyprotected')).lower() == 'true':
             self.report_drm(item_id)
 
         formats = []
         hls_url = url_or_none(f'{media.get("hls_server") or ""}{media.get("hls_url") or ""}')
         if hls_url:
-            fmts = self._extract_m3u8_formats(hls_url, item_id, 'mp4', m3u8_id='hls', fatal=False)
+            fmts = self._extract_m3u8_formats(
+                hls_url, item_id, 'm4a' if medium == 'audio' else 'mp4', m3u8_id='hls', fatal=False)
             if medium == 'audio':
                 for f in fmts:
                     if not f.get('vcodec') or f['vcodec'] == 'unknown':
@@ -362,21 +428,47 @@ class RteClipIE(_RteBaseIE):
         if not uploader or uploader == 'WEB Exclusive':
             uploader = unescapeHTML(show.get('provider')) or 'RTÉ'
         timestamp = self._irish_timestamp(show.get('published'))
-        is_episode = '/episodes/' in url
+        title = self._clean_title(show.get('title'))
+
+        # Episode or clip: the URL says so on radio pages; otherwise RTE's data does
+        if '/episodes/' in url:
+            media_type = 'episode'
+        elif '/clips/' in url:
+            media_type = 'clip'
+        elif medium == 'audio' and (show.get('form') == 'long' or show.get('episode_id') == show.get('itemid')):
+            media_type = 'episode'
+        else:
+            media_type = 'clip'
+
+        description = unescapeHTML(show.get('description')) or None
+        series = self._clean_title(show.get('series'))
+        if medium == 'audio':
+            # RTE's programme title, for older items whose series field is empty
+            series = series or self._clean_title(show.get('ptitle'))
+            if not description:
+                page_url = url if url.startswith(('http://www.rte.ie/radio/', 'https://www.rte.ie/radio/')) else None
+                slug = self._station_slug(show.get('channelid'))
+                if not page_url and slug:
+                    page_url = f'https://www.rte.ie/radio/{slug}/clips/{item_id}/'
+                if page_url:
+                    webpage = self._download_webpage(
+                        page_url, item_id, 'Downloading radio page for description', fatal=False) or ''
+                    description = (self._og_search_description(webpage, default=None)
+                                   or self._html_search_meta('description', webpage, default=None))
         genre = unescapeHTML(show.get('genre'))
         return {
             'id': item_id,
-            'title': (unescapeHTML(show.get('title')) or '').strip() or None,
-            'description': unescapeHTML(show.get('description')) or None,
+            'title': title,
+            'description': description,
             'duration': float_or_none(show.get('duration'), 1000),
             'timestamp': timestamp,
-            'release_timestamp': timestamp if is_episode else None,
+            'release_timestamp': timestamp if media_type == 'episode' else None,
             'thumbnail': url_or_none(show.get('thumbnail')),
             'uploader': uploader,
             'channel': station or uploader,
-            'series': unescapeHTML(show.get('series')) or None,
+            'series': series,
             'categories': [genre] if genre else None,
-            'media_type': 'episode' if is_episode else 'clip' if '/clips/' in url else None,
+            'media_type': media_type,
             'formats': formats,
         }
 
@@ -394,19 +486,35 @@ class RteArchivesIE(_RteBaseIE):
             'release_date': '19760611',
         },
     }]
+    _MONTHS = r'(?:January|February|March|April|May|June|July|August|September|October|November|December)'
 
     def _release_date(self, webpage):
-        """The clip's own date is the last 'broadcast on <date>' in the caption, checked against
-        the page's year tag. If they disagree, only the year is trusted."""
+        """The clip's own broadcast date from the caption.
+
+        Candidates are 'broadcast on <date>' phrases whose year matches the page's year tag.
+        Sentences about this episode/report are preferred, sentences about the series (its first
+        episode, its run) are avoided; ties go to the later sentence. Without a match, only the
+        year tag is used."""
         year = int_or_none(self._search_regex(
             r'<span[^>]+class="date_tag"[^>]*>\s*(\d{4})', webpage, 'year', default=None))
         text = unescapeHTML(re.sub(r'<[^>]+>', ' ', webpage))
-        dates = re.findall(
-            r'broadcast on (\d{1,2}(?:st|nd|rd|th)? (?:January|February|March|April|May|June|July|'
-            r'August|September|October|November|December) \d{4})', text)
-        date = unified_strdate(re.sub(r'(?<=\d)(?:st|nd|rd|th)\b', '', dates[-1])) if dates else None
-        if date and (not year or int(date[:4]) == year):
-            return {'release_date': date}
+        text = re.sub(r'\s+', ' ', text)
+        best = None
+        for idx, sentence in enumerate(re.split(r'(?<=[.!?])\s+', text)):
+            for m in re.finditer(rf'broadcast on (\d{{1,2}})(?:st|nd|rd|th)? ({self._MONTHS}) (\d{{4}})', sentence):
+                date = unified_strdate(f'{m.group(1)} {m.group(2)} {m.group(3)}')
+                if not date or (year and int(date[:4]) != year):
+                    continue
+                low = sentence.lower()
+                score = 0
+                if re.search(r'\bthis (?:episode|programme|report|edition)\b|\breport\b', low):
+                    score += 2
+                if re.search(r'\bfirst episode\b|\bseries\b|\bran (?:until|for)\b', low):
+                    score -= 2
+                if best is None or (score, idx) >= best[:2]:
+                    best = (score, idx, date)
+        if best:
+            return {'release_date': best[2]}
         return {'release_year': year} if year else {}
 
     def _real_extract(self, url):
@@ -424,6 +532,7 @@ class RteArchivesIE(_RteBaseIE):
             'tags': [k.strip() for k in keywords.split(',') if k.strip()] if keywords else None,
             'uploader': 'RTÉ Archives',
             'channel': 'RTÉ Archives',
+            'media_type': 'clip',
         }
         if len(embeds) == 1:
             return self.url_result(
@@ -435,9 +544,9 @@ class RteArchivesIE(_RteBaseIE):
 
 class RteRadioProgrammeIE(_RteBaseIE):
     IE_NAME = 'rte:radio:programme'
-    IE_DESC = 'RTÉ radio programme pages: all episodes, newest first'
+    IE_DESC = 'RTÉ radio programme pages: all episodes (or clips), newest first'
     _VALID_URL = r'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/(?P<id>(?!clips(?:[/?#]|$))[\w-]+)(?:/episodes)?/?(?:[?#]|$)'
-    _PAGE_SIZE = 100  # fixed by RTE's episodes/json endpoint
+    _PAGE_SIZE = 100  # fixed by RTE's episodes/json and clips/json endpoints
     _TESTS = [{
         'url': 'https://www.rte.ie/radio/radio1/morning-ireland/',
         'info_dict': {'id': 'morning-ireland', 'title': 'Morning Ireland'},
@@ -447,49 +556,213 @@ class RteRadioProgrammeIE(_RteBaseIE):
         'only_matching': True,
     }]
 
-    def _fetch_page(self, station, programme, page):
-        # RTE's num_pages/total_items are unreliable; the list ends with a short page or,
-        # when the last page is exactly full, with HTTP 404 for the next one
-        try:
-            data = self._download_json(
-                f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
-                f'Downloading episodes page {page + 1}', query={'page': page + 1})
-        except ExtractorError as e:
-            if page > 0 and isinstance(e.cause, HTTPError) and e.cause.status == 404:
+    def _list_page(self, station, programme, kind, page):
+        """One page of RTE's episodes/json or clips/json; None at the end of the list.
+
+        RTE's num_pages/total_items are unreliable; the list ends with a short page or,
+        when the last page is exactly full, with HTTP 404 for the next one."""
+        data = self._download_json_retry(
+            f'https://www.rte.ie/radio/{station}/{programme}/{kind}/json/', programme,
+            f'Downloading {kind} page {page}', query={'page': page}, end_statuses=(404, 500))
+        return traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))) or None
+
+    def _item_timestamp(self, item):
+        return (self._irish_timestamp(item.get('published'))
+                or (lambda t: t if t and t > 0 else None)(int_or_none(item.get('BroadcastDateUnixTime'))))
+
+    def _entry(self, item, station, programme, kind, **extra):
+        item_id = self._normalise_id(item.get('id') or item['itemid'])
+        if kind == 'clips':
+            item_url = f'https://www.rte.ie/radio/{station}/clips/{item_id}/'
+        else:
+            item_url = f'https://www.rte.ie/radio/{station}/{programme}/episodes/{item_id}/'
+        timestamp = self._item_timestamp(item)
+        is_episode = kind == 'episodes'
+        return self.url_result(
+            item_url, RteClipIE, item_id, self._clean_title(item.get('title')),
+            timestamp=timestamp, upload_date=self._utc_date(timestamp),
+            release_timestamp=timestamp if is_episode else None,
+            release_date=self._utc_date(timestamp) if is_episode else None,
+            # RTE's list durations are wrong for older (numeric) items; the item itself has the right one
+            duration=None if item_id.isdigit() else float_or_none(item.get('duration'), 1000),
+            series=self._clean_title(item.get('programme_title')),
+            channel=self._station_name(station, item.get('channelid')),
+            media_type='episode' if is_episode else 'clip', **extra)
+
+    def _fill_gap(self, station, programme, newer, older, seen):
+        """EXPERIMENTAL. Finds episodes that RTE's own episode list skips between two of its pages.
+
+        RTE pages its list of new (UUID) and older (numeric) episodes inconsistently, so page N+1
+        can start months after page N ends, although the skipped episodes exist and play (e.g.
+        News at One 1 April 2026, 11787175). No RTE listing reaches them, so they are searched
+        for in the older lookup's ID sequence: IDs there are given out per day, station by station,
+        in broadcast order, so the next episode of a programme is roughly one day's worth of IDs
+        after the previous one. Only numeric (older-system) episodes can be found this way.
+
+        Yields playlist entries newest first, marked rte_gap_filled=True.
+        Disable with --extractor-args "rteradioprogramme:fill_gaps=no".
+        """
+        def numeric(items):
+            return sorted((i for i in items if str(i.get('id') or i.get('itemid')).isdigit()),
+                          key=lambda i: int(i.get('id') or i['itemid']))
+
+        older_num, newer_num = numeric(older), numeric(newer)
+        if len(older_num) < 2 or not newer_num:
+            return
+        lo, hi = older_num[-1], newer_num[0]  # newest older-page item, oldest newer-page item
+        lo_id, hi_id = int(lo.get('id') or lo['itemid']), int(hi.get('id') or hi['itemid'])
+        lo_ts, hi_ts = self._item_timestamp(lo), self._item_timestamp(hi)
+        if not lo_ts or not hi_ts or hi_id <= lo_id or hi_ts <= lo_ts:
+            return
+
+        # The programme's rhythm, from the older page: usual gap between episodes, weekdays, time
+        times = sorted(filter(None, (self._item_timestamp(i) for i in older_num)))
+        spacing = statistics.median(b - a for a, b in zip(times, times[1:])) if len(times) > 1 else 86400
+        if hi_ts - lo_ts <= max(2 * 86400, 3 * spacing):
+            return  # no gap
+        local = [self._irish_local(t) for t in times]
+        weekdays = {d.weekday() for d in local}
+        hour, minute = statistics.mode((d.hour, d.minute) for d in local)
+        title_key = (self._clean_title(lo.get('programme_title') or lo.get('title')) or '').lower()
+        channel_id = int_or_none(lo.get('channelid'))
+        ids_per_day = (hi_id - lo_id) / ((hi_ts - lo_ts) / 86400)
+
+        first_day = self._irish_local(lo_ts).date() + dt.timedelta(days=1)
+        last_day = self._irish_local(hi_ts).date()
+        days = [first_day + dt.timedelta(days=n) for n in range((last_day - first_day).days)
+                if (first_day + dt.timedelta(days=n)).weekday() in weekdays]
+        if not days:
+            return
+        self.to_screen(
+            f'{programme}: RTÉ\'s episode list skips {first_day} to {last_day - dt.timedelta(days=1)}; '
+            f'searching for the missing episodes (experimental; disable with '
+            f'--extractor-args "rteradioprogramme:fill_gaps=no")')
+
+        clip_ie = self._downloader.get_info_extractor(RteClipIE.ie_key())
+        cache = {}
+
+        def probe(item_id):
+            if item_id not in cache:
+                cache[item_id] = clip_ie._lookup(str(item_id), note=False, fatal=False)
+            return cache[item_id]
+
+        def matches(show, day):
+            if not show or int_or_none(show.get('channelid')) != channel_id:
+                return False
+            ts = self._irish_timestamp(show.get('published'))
+            if not ts or self._irish_local(ts).date() != day:
+                return False
+            names = {(self._clean_title(show.get(k)) or '').lower() for k in ('ptitle', 'series', 'title')}
+            return any(n == title_key or n.startswith(f'{title_key} ') for n in names if n)
+
+        budget = 40 * len(days) + 100  # lookups allowed for this gap
+        found = []
+        anchor_id, anchor_ts = lo_id, lo_ts
+        for day in days:
+            if budget <= 0:
+                self.report_warning(f'{programme}: gap search stopped (lookup limit reached)')
+                break
+            target_local = dt.datetime.combine(day, dt.time(hour, minute))
+            start, end = self._summer_time(day.year)
+            target_ts = calendar.timegm(target_local.timetuple())
+            target_ts -= 3600 if start <= target_ts - 3600 < end else 0
+            guess = anchor_id + round(ids_per_day * (target_ts - anchor_ts) / 86400)
+            # Re-centre on the right day once, then search outwards around the guess
+            show = probe(guess)
+            budget -= 1
+            if show:
+                ts = self._irish_timestamp(show.get('published'))
+                if ts and abs(ts - target_ts) > 43200:
+                    guess += round(ids_per_day * (target_ts - ts) / 86400)
+            hit = None
+            for offset in itertools.chain([0], *zip(range(1, 61), range(-1, -61, -1))):
+                if budget <= 0:
+                    break
+                cand = guess + offset
+                if not lo_id < cand < hi_id:
+                    continue
+                show = probe(cand)
+                budget -= 1
+                if matches(show, day):
+                    hit = cand, show
+                    break
+            if not hit:
+                continue
+            cand, show = hit
+            ts = self._irish_timestamp(show.get('published'))
+            anchor_id, anchor_ts = cand, ts or target_ts
+            if str(cand) in seen:
+                continue
+            seen.add(str(cand))
+            found.append(self.url_result(
+                f'https://www.rte.ie/radio/{station}/{programme}/episodes/{cand}/', RteClipIE, str(cand),
+                self._clean_title(show.get('title')),
+                timestamp=ts, upload_date=self._utc_date(ts),
+                release_timestamp=ts, release_date=self._utc_date(ts),
+                duration=float_or_none(show.get('duration'), 1000),
+                series=self._clean_title(show.get('ptitle') or show.get('series')),
+                channel=self._station_name(station, show.get('channelid')),
+                media_type='episode', rte_gap_filled=True))
+        self.to_screen(f'{programme}: found {len(found)} of {len(days)} possible missing episodes')
+        yield from reversed(found)  # newest first, like the rest of the list
+
+    def _entries(self, station, programme, kind, first_page):
+        fill_gaps = (kind == 'episodes'
+                     and self._configuration_arg('fill_gaps', ['yes'])[0] not in ('no', 'false', '0', 'off'))
+        seen, previous = set(), None
+        for page in itertools.count(1):
+            items = first_page if page == 1 else self._list_page(station, programme, kind, page)
+            if not items:
                 return
-            raise
-        channel = self._station_name(station)
-        for ep in traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))):
-            ep_id = self._normalise_id(ep.get('id') or ep['itemid'])
-            ep_url = urllib.parse.urljoin('https://www.rte.ie/', ep.get('url') or '') if ep.get('url') else None
-            if not ep_url or not RteClipIE.suitable(ep_url):
-                ep_url = f'https://www.rte.ie/radio/{station}/{programme}/episodes/{ep_id}/'
-            timestamp = self._irish_timestamp(ep.get('published')) or int_or_none(ep.get('BroadcastDateUnixTime')) or None
-            yield self.url_result(
-                ep_url, RteClipIE, ep_id, unescapeHTML(ep.get('title')),
-                timestamp=timestamp, release_timestamp=timestamp,
-                upload_date=self._utc_date(timestamp), release_date=self._utc_date(timestamp),
-                duration=float_or_none(ep.get('duration'), 1000),
-                series=unescapeHTML(ep.get('programme_title')) or None,
-                channel=channel, media_type='episode')
+            if fill_gaps and previous:
+                yield from self._fill_gap(station, programme, previous, items, seen)
+            for item in items:
+                entry = self._entry(item, station, programme, kind)
+                if entry['id'] in seen:
+                    continue
+                seen.add(entry['id'])
+                yield entry
+            if len(items) < self._PAGE_SIZE:
+                return
+            previous = items
+
+    def _page_link_entries(self, webpage, station, programme):
+        """Last resort: episode and clip links on the programme page itself (no dates)."""
+        seen = set()
+        for path in re.findall(
+                rf'href="(?:https?://www\.rte\.ie)?(/radio/[\w-]+/(?:{re.escape(programme)}/episodes|clips)/[\da-fA-F-]{{4,}}/)"',
+                webpage):
+            item_url = f'https://www.rte.ie{path}'
+            mobj = RteClipIE._match_valid_url(item_url)
+            if not mobj or path in seen:
+                continue
+            seen.add(path)
+            yield self.url_result(item_url, RteClipIE, self._normalise_id(mobj.group('id')),
+                                  media_type='episode' if '/episodes/' in path else 'clip')
 
     def _real_extract(self, url):
-        station, programme = self._match_valid_url(url).group('station', 'id')
-        first = self._download_json(
-            f'https://www.rte.ie/radio/{station}/{programme}/episodes/json/', programme,
-            'Checking programme', query={'page': 1}, fatal=False)
-        if not traverse_obj(first, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))):
-            raise ExtractorError('Not an RTÉ radio programme page (no episodes found)', expected=True)
+        station, programme = (s.lower() for s in self._match_valid_url(url).group('station', 'id'))
         webpage = self._download_webpage(
             f'https://www.rte.ie/radio/{station}/{programme}/', programme, fatal=False) or ''
         json_ld = list(self._yield_json_ld(webpage, programme, fatal=False))
         show = traverse_obj(json_ld, (lambda _, v: v.get('@type') == 'Show', any)) or {}
-        title = (unescapeHTML(show.get('name'))
+
+        # Episodes; for clip-only programmes, clips; failing both, the page's own links
+        kind, first = 'episodes', self._list_page(station, programme, 'episodes', 1)
+        if not first:
+            kind, first = 'clips', self._list_page(station, programme, 'clips', 1)
+        if first:
+            entries = self._entries(station, programme, kind, first)
+        else:
+            entries = list(self._page_link_entries(webpage, station, programme))
+            if not entries:
+                raise ExtractorError('Not an RTÉ radio programme page (no episodes found)', expected=True)
+
+        title = (self._clean_title(show.get('name'))
                  or self._html_search_meta('twitter:title', webpage, default=None)
-                 or traverse_obj(first, ('programmes', 0, 'programme_title')) or programme)
-        channel = self._station_name(station)
+                 or self._clean_title(traverse_obj(first, (0, 'programme_title'))) or programme)
+        channel = self._station_name(station, traverse_obj(first, (0, 'channelid')))
         return self.playlist_result(
-            OnDemandPagedList(lambda p: self._fetch_page(station, programme, p), self._PAGE_SIZE),
-            programme, title,
+            entries, programme, title,
             unescapeHTML(show.get('description')) or self._og_search_description(webpage, default=None),
             thumbnail=url_or_none(show.get('image')), uploader=channel, channel=channel)
