@@ -29,10 +29,12 @@ class TestSetup(RteTestCase):
     def test_loads_this_checkout_only(self):
         res, plugins, dirs = _debug_header()
         self.assertEqual(plugins, PLUGIN_CLASSES, f'plugin extractor classes\n{res.describe()}')
-        expected_dir = os.path.join(REPO_ROOT, 'yt_dlp_plugins')
-        self.assertEqual(dirs.strip(), expected_dir,
-                         f'plugin directories should be only this checkout\n{res.describe()}')
-        self.assertTrue(PLUGIN_PARENT and dirs.startswith(PLUGIN_PARENT))
+        # exactly one plugin directory, and it is this checkout (reached through the suite's link)
+        listed = [d.strip() for d in dirs.split(',') if d.strip()]
+        self.assertEqual(len(listed), 1, f'plugin directories should be only this checkout: {listed}\n{res.describe()}')
+        self.assertEqual(os.path.realpath(listed[0]), os.path.realpath(os.path.join(REPO_ROOT, 'yt_dlp_plugins')),
+                         f'plugin directory is not this checkout\n{res.describe()}')
+        self.assertTrue(listed[0].startswith(PLUGIN_PARENT), f'not loaded through the suite folder: {listed[0]}')
 
     def test_no_plugins_without_plugin_dirs(self):
         res, plugins, dirs = _debug_header(plugins=False)

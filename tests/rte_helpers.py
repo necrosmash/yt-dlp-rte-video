@@ -25,7 +25,25 @@ except Exception:  # no tz database
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TESTS_DIR)
-PLUGIN_PARENT = os.path.dirname(REPO_ROOT)  # --plugin-dirs takes the folder that holds the package
+# --plugin-dirs takes a folder that holds plugin packages, and yt-dlp loads every package in it.
+# The checkout's own parent may hold other plugins (e.g. ~/.yt-dlp/plugins), so yt-dlp is given a
+# private temporary folder holding only a link to this checkout.
+PLUGIN_PARENT = tempfile.mkdtemp(prefix='rte-tests-plugins-')
+_PLUGIN_LINK = os.path.join(PLUGIN_PARENT, os.path.basename(REPO_ROOT))
+os.symlink(REPO_ROOT, _PLUGIN_LINK, target_is_directory=True)
+
+
+def _remove_plugin_link():
+    # unlink the symlink itself (never follows it into the checkout), then the empty folder
+    if os.path.islink(_PLUGIN_LINK):
+        os.unlink(_PLUGIN_LINK)
+    try:
+        os.rmdir(PLUGIN_PARENT)
+    except OSError:
+        pass
+
+
+atexit.register(_remove_plugin_link)
 YTDLP = os.environ.get('YTDLP', '/usr/local/bin/yt-dlp')
 SLOW = os.environ.get('RTE_TESTS_SLOW') == '1'
 IN_IRELAND = os.environ.get('RTE_TESTS_IN_IRELAND') == '1'
