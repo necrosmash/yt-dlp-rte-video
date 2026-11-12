@@ -598,18 +598,9 @@ class RteRadioProgrammeIE(_RteBaseIE):
             media_type='episode' if is_episode else 'clip', **extra)
 
     def _fill_gap(self, station, programme, newer, older, seen):
-        """EXPERIMENTAL. Finds episodes that RTE's own episode list skips between two of its pages.
-
-        RTE pages its list of new (UUID) and older (numeric) episodes inconsistently, so page N+1
-        can start months after page N ends, although the skipped episodes exist and play (e.g.
-        News at One 1 April 2026, 11787175). No RTE listing reaches them, so they are searched
-        for in the older lookup's ID sequence: IDs there are given out per day, station by station,
-        in broadcast order, so the next episode of a programme is roughly one day's worth of IDs
-        after the previous one. Only numeric (older-system) episodes can be found this way.
-
-        Yields playlist entries newest first, marked rte_gap_filled=True.
-        Disable with --extractor-args "rteradioprogramme:fill_gaps=no".
-        """
+        # EXPERIMENTAL, off by default (enable with --extractor-args "rteradioprogramme:fill_gaps=yes").
+        # Finds episodes that RTE's own episode list skips between two of its pages by searching
+        # RTE's older ID sequence for each missing day, and yields them marked rte_gap_filled=True.
         def numeric(items):
             return sorted((i for i in items if str(i.get('id') or i.get('itemid')).isdigit()),
                           key=lambda i: int(i.get('id') or i['itemid']))
@@ -643,8 +634,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
             return
         self.to_screen(
             f'{programme}: RTÉ\'s episode list skips {first_day} to {last_day - dt.timedelta(days=1)}; '
-            f'searching for the missing episodes (experimental; disable with '
-            f'--extractor-args "rteradioprogramme:fill_gaps=no")')
+            f'searching for the missing episodes (experimental)')
 
         clip_ie = self._downloader.get_info_extractor(RteClipIE.ie_key())
         cache = {}
@@ -721,7 +711,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
 
     def _entries(self, station, programme, kind, first_page):
         fill_gaps = (kind == 'episodes'
-                     and self._configuration_arg('fill_gaps', ['yes'])[0] not in ('no', 'false', '0', 'off'))
+                     and self._configuration_arg('fill_gaps', ['no'])[0] in ('yes', 'true', '1', 'on'))
         seen, previous = set(), None
         for page in itertools.count(1):
             items = first_page if page == 1 else self._list_page(station, programme, kind, page)
