@@ -336,14 +336,15 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
             uploader='RTÉ', channel='RTÉ')
 
 
-class RteClipIE(_RteBaseIE):
+class RteAvgenIE(_RteBaseIE):
     """Everything served by RTE's older lookup (rteavgen/getplaylist): one ID system, one extractor.
 
     Radio clips and episodes, Bosco embeds (news articles) and numeric dustin embeds (RTE Archives)
     all resolve to the same item ID, so they share one archive key.
     """
-    IE_NAME = 'rte:clip'
-    IE_DESC = 'RTÉ radio clips and episodes, RTÉ News and RTÉ Archives videos'
+    IE_NAME = 'rte:avgen'
+    IE_DESC = ("Items from RTÉ's rteavgen service: radio episodes and clips, RTÉ News article videos, "
+               'RTÉ Archives video and audio (rte.ie/video is rte:video)')
     # Numeric item IDs have at least 4 digits; small numbers are live-station ids (live player embeds)
     _ID_RE = r'(?P<id>[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}|\d{4,})'
     _VALID_URL = [
@@ -525,7 +526,7 @@ class RteArchivesIE(_RteBaseIE):
     def _real_extract(self, url):
         page_id = self._match_id(url)
         webpage = self._download_webpage(url, page_id)
-        embeds = [*RteClipIE._extract_embed_urls(url, webpage), *RteVideoIE._extract_embed_urls(url, webpage)]
+        embeds = [*RteAvgenIE._extract_embed_urls(url, webpage), *RteVideoIE._extract_embed_urls(url, webpage)]
         embeds = list(dict.fromkeys(embeds))
         if not embeds:
             raise ExtractorError('No video found on this page', expected=True)
@@ -589,7 +590,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
         item_url = (f'https://www.rte.ie/radio/{station}/{programme}/episodes/{item_id}/' if is_episode
                     else f'https://www.rte.ie/radio/{station}/clips/{item_id}/')
         return self.url_result(
-            item_url, RteClipIE, item_id, self._clean_title(item.get('title')),
+            item_url, RteAvgenIE, item_id, self._clean_title(item.get('title')),
             timestamp=timestamp, upload_date=self._utc_date(timestamp),
             release_timestamp=timestamp if is_episode else None,
             release_date=self._utc_date(timestamp) if is_episode else None,
@@ -638,12 +639,12 @@ class RteRadioProgrammeIE(_RteBaseIE):
             f'{programme}: RTÉ\'s episode list skips {first_day} to {last_day - dt.timedelta(days=1)}; '
             f'searching for the missing episodes (experimental)')
 
-        clip_ie = self._downloader.get_info_extractor(RteClipIE.ie_key())
+        avgen_ie = self._downloader.get_info_extractor(RteAvgenIE.ie_key())
         cache = {}
 
         def probe(item_id):
             if item_id not in cache:
-                cache[item_id] = clip_ie._lookup(str(item_id), note=False, fatal=False)
+                cache[item_id] = avgen_ie._lookup(str(item_id), note=False, fatal=False)
             return cache[item_id]
 
         def matches(show, day):
@@ -700,7 +701,7 @@ class RteRadioProgrammeIE(_RteBaseIE):
                 continue
             seen.add(str(cand))
             found.append(self.url_result(
-                f'https://www.rte.ie/radio/{station}/{programme}/episodes/{cand}/', RteClipIE, str(cand),
+                f'https://www.rte.ie/radio/{station}/{programme}/episodes/{cand}/', RteAvgenIE, str(cand),
                 self._clean_title(show.get('title')),
                 timestamp=ts, upload_date=self._utc_date(ts),
                 release_timestamp=ts, release_date=self._utc_date(ts),
