@@ -13,15 +13,16 @@ Supported URLs
   https://www.rte.ie/radio/<station>/clips/<id>/                    radio clip (audio)
   https://www.rte.ie/radio/<station>/<programme>/episodes/<id>/     radio episode (audio)
   https://www.rte.ie/radio/<station>/<programme>/                   radio programme (playlist of episodes)
+  https://www.rte.ie/radio/<station>/<programme>/clips/             radio programme (playlist of clips)
 
 Items RTE marks as DRM-protected are reported as DRM and not downloaded.
 RTE Player (/player/...) and live TV use DRM and are not supported.
 Geo-restriction is handled like yt-dlp's SVT extractor: Ireland is named in the
 error, and no fake IP is sent unless the user asks for it with --xff.
 
-Experimental: radio programme playlists fill gaps in RTE's own episode list
-(see RteRadioProgrammeIE._fill_gap). Disable with
-  --extractor-args "rteradioprogramme:fill_gaps=no"
+Experimental, off by default: radio programme playlists can fill gaps in RTE's own
+episode list (see RteRadioProgrammeIE._fill_gap). Enable with
+  --extractor-args "rteradioprogramme:fill_gaps=yes"
 """
 import base64
 import calendar
@@ -330,7 +331,7 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
         category = self._match_id(url)
         page_url = f'https://www.rte.ie/video/category/{category}/' if category else 'https://www.rte.ie/video/'
         webpage = self._download_webpage(page_url, category or 'all', 'Downloading category page', fatal=False) or ''
-        name = category.lower().capitalize() if category else 'all'
+        name = category.lower().capitalize() if category else 'All'
         return self.playlist_result(
             self._entries(category), (category or 'all').lower(), f'RTÉ video: {name}',
             thumbnail=self._og_search_thumbnail(webpage, default=None),
@@ -382,7 +383,7 @@ class RteAvgenIE(_RteBaseIE):
         'only_matching': True,
     }]
 
-    def _lookup(self, item_id, *, note=None, fatal=True):
+    def _lookup(self, item_id, *, note='Downloading item data', fatal=True):
         """One item from the older lookup; None (or an error) if RTE doesn't have it."""
         # RTE answers unknown or expired items with HTTP 404 and an explanation in the JSON body
         data = self._download_json(
