@@ -130,7 +130,8 @@ class _RteBaseIE(InfoExtractor):
 
     def _download_json_retry(self, url, video_id, note, query=None, *, end_statuses=(404,)):
         """JSON with yt-dlp's --extractor-retries for transient errors. Returns None for HTTP
-        statuses that mean "no more data" (end_statuses); other HTTP errors are raised at once."""
+        statuses that mean "no more data" (end_statuses); server errors (5xx) are retried, other
+        HTTP errors are raised at once."""
         for retry in self.RetryManager():
             try:
                 return self._download_json(url, video_id, note, query=query)
@@ -138,7 +139,8 @@ class _RteBaseIE(InfoExtractor):
                 if isinstance(e.cause, HTTPError):
                     if e.cause.status in end_statuses:
                         return None
-                    raise
+                    if e.cause.status < 500:
+                        raise
                 retry.error = e
 
 
@@ -191,7 +193,7 @@ class _RteVideoBaseIE(_RteBaseIE):
             'display_id': entry['guid'],
             'title': self._clean_title(entry.get('title')),
             'description': unescapeHTML(entry.get('plprogram$longDescription')) or None,
-            'duration': float_or_none(entry.get('plprogram$runtime')),
+            'duration': float_or_none(entry.get('plprogram$runtime')) or None,  # 0 = unknown
             'timestamp': int_or_none(entry.get('rte$broadcastDate'), 1000),
             'thumbnail': url_or_none(entry.get('rte$defaultThumbnail')),
             'uploader': 'RTÉ',
@@ -327,7 +329,7 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
         category = self._match_id(url)
         page_url = f'https://www.rte.ie/video/category/{category}/' if category else 'https://www.rte.ie/video/'
         webpage = self._download_webpage(page_url, category or 'all', 'Downloading category page', fatal=False) or ''
-        name = category[:1].upper() + category[1:] if category else 'all'
+        name = category.lower().capitalize() if category else 'all'
         return self.playlist_result(
             self._entries(category), (category or 'all').lower(), f'RTÉ video: {name}',
             thumbnail=self._og_search_thumbnail(webpage, default=None),
@@ -430,12 +432,15 @@ class RteClipIE(_RteBaseIE):
         timestamp = self._irish_timestamp(show.get('published'))
         title = self._clean_title(show.get('title'))
 
-        # Episode or clip: the URL says so on radio pages; otherwise RTE's data does
+        # Episode or clip: the URL says so on radio pages; otherwise RTE's data does. Only items
+        # of a radio station count as broadcast episodes (archive audio has no station, and its
+        # published date is its upload date, not a broadcast date)
         if '/episodes/' in url:
             media_type = 'episode'
         elif '/clips/' in url:
             media_type = 'clip'
-        elif medium == 'audio' and (show.get('form') == 'long' or show.get('episode_id') == show.get('itemid')):
+        elif (medium == 'audio' and self._station_slug(show.get('channelid'))
+              and (show.get('form') == 'long' or show.get('episode_id') == show.get('itemid'))):
             media_type = 'episode'
         else:
             media_type = 'clip'
@@ -563,7 +568,10 @@ class RteRadioProgrammeIE(_RteBaseIE):
         when the last page is exactly full, with HTTP 404 for the next one."""
         data = self._download_json_retry(
             f'https://www.rte.ie/radio/{station}/{programme}/{kind}/json/', programme,
-            f'Downloading {kind} page {page}', query={'page': page}, end_statuses=(404, 500))
+            f'Downloading {kind} page {page}', query={'page': page},
+            # 500 on page 1 = no such list (e.g. doconone); later, only 404 ends the list, so a
+            # server error mid-list is retried and then fails instead of silently truncating
+            end_statuses=(404, 500) if page == 1 else (404,))
         return traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))) or None
 
     def _item_timestamp(self, item):
@@ -652,8 +660,13 @@ class RteRadioProgrammeIE(_RteBaseIE):
             ts = self._irish_timestamp(show.get('published'))
             if not ts or self._irish_local(ts).date() != day:
                 return False
-            names = {(self._clean_title(show.get(k)) or '').lower() for k in ('ptitle', 'series', 'title')}
-            return any(n == title_key or n.startswith(f'{title_key} ') for n in names if n)
+            # RTE's programme name must match exactly (so "News at One Podcast" is not taken
+            # for "News at One"); the item title is only used when there is no programme name
+            names = {(self._clean_title(show.get(k)) or '').lower() for k in ('ptitle', 'series')} - {''}
+            if names:
+                return title_key in names
+            name = (self._clean_title(show.get('title')) or '').lower()
+            return name == title_key or name.startswith(f'{title_key} ')
 
         budget = 40 * len(days) + 100  # lookups allowed for this gap
         found = []
