@@ -189,6 +189,17 @@ class TestNewsAtOne(ProgrammeCase):
         self.assertOk(res, '404 after a full page must end the list with exit 0: ')
         self.assertEqual(res.stdout.split(), [norm_id(i['id']) for i in self.p1[98:100]])
 
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
+    def test_empty_page_after_full_page_ends_cleanly(self):
+        """RTÉ may answer the page after an exactly full last page with an empty list; that ends the list."""
+        empty = {'page': 2, 'num_pages': 0, 'num_per_page': 100, 'total_items': 0, 'programmes': []}
+        res = ytdlp('--flat-playlist', '-I', '99:102', '--print', 'id', NAO, faults=[simulate(PAGE2, empty)])
+        self.assertFaultHit(res)
+        self.assertOk(res, 'an empty page after a full page must end the list with exit 0: ')
+        self.assertEqual(res.stdout.split(), [norm_id(i['id']) for i in self.p1[98:100]])
+
     def test_500_on_page_1_is_clean_error(self):
         """A server error on the first page gives a clear \"no episode list\" error."""
         res = ytdlp('--flat-playlist', '-I', '1:2', NAO, faults=[{'match': PAGE1, 'status': 500, 'times': -1}])

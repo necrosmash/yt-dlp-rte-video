@@ -76,7 +76,7 @@ class TestSimulatedCaptions(RteTestCase):
         d, res = info(url, faults=[
             simulate(re.escape(url), _sim_page(caption, year_tag, item_id), content_type='text/html; charset=utf-8'),
             simulate(GETPLAYLIST.format(item_id), sim_show(
-                item_id, channelid=None, channel=None, provider='RTÉ', medium='video', ptitle='RTÉ Archives')),
+                item_id, channelid='13', channel='WEB Exclusive', provider='RTÉ', medium='video', ptitle='RTÉ Archives')),
         ])
         self.assertOk(res)
         self.assertEqual(d.get('title'), 'Simulated archive page')

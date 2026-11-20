@@ -155,14 +155,17 @@ class TestSimulatedItems(RteTestCase):
     # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
     # on real data; update the simulated data to match RTÉ's new format.
     def test_archive_audio_has_no_release_date(self):
-        """Archive audio has no station, and its published date is an upload date, not a broadcast date."""
-        d = self.sim_info('https://www.rte.ie/media-embed/dustin/?id=99999903', '99999903',
-                          channelid=None, channel=None, provider='RTÉ', form='long', series=None,
-                          ptitle='RTÉ Archives Audio', published='2014-02-18T11:32:03')
-        self.assertEqual(d['media_type'], 'clip')
-        self.assertIsNone(d.get('release_date'))
-        self.assertIsNone(d.get('release_timestamp'))
-        self.assertEqual((d['series'], d['uploader'], d['channel']), ('RTÉ Archives Audio', 'RTÉ', 'RTÉ'))
+        """Archive items are not on a radio station (no station number, or 13), and their published
+        date is an upload date, not a broadcast date."""
+        for item_id, channelid, channel in (('99999903', None, None), ('99999907', '13', 'WEB Exclusive')):
+            with self.subTest(channelid=channelid):
+                d = self.sim_info(f'https://www.rte.ie/media-embed/dustin/?id={item_id}', item_id,
+                                  channelid=channelid, channel=channel, provider='RTÉ', form='long', series=None,
+                                  ptitle='RTÉ Archives Audio', published='2014-02-18T11:32:03')
+                self.assertEqual(d['media_type'], 'clip')
+                self.assertIsNone(d.get('release_date'))
+                self.assertIsNone(d.get('release_timestamp'))
+                self.assertEqual((d['series'], d['uploader'], d['channel']), ('RTÉ Archives Audio', 'RTÉ', 'RTÉ'))
 
     # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
     # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
@@ -170,7 +173,7 @@ class TestSimulatedItems(RteTestCase):
     def test_web_exclusive_is_not_the_uploader(self):
         """RTÉ labels some news videos 'WEB Exclusive' where the channel goes; that is not an uploader."""
         d = self.sim_info('https://www.rte.ie/bosco/components/player/iframe.html?clipid=99999904', '99999904',
-                          channel='WEB Exclusive', channelid=None, medium='video', provider=None)
+                          channel='WEB Exclusive', channelid='13', medium='video', provider=None)
         self.assertEqual((d['uploader'], d['media_type']), ('RTÉ', 'clip'))
 
     # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen

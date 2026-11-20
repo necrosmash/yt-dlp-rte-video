@@ -68,4 +68,10 @@ What it tests:
 - error handling: DRM, geo-blocking, expired items, empty lists, and RTÉ server errors (injected);
 - that vanilla yt-dlp still lacks support for these URLs, and that yt-dlp's own RTÉ extractors are left alone.
 
+An optional extra check, not part of the normal run, confirms that real RTÉ data still has the shape of the simulated data, and that the situations it simulates really occur:
+
+```bash
+python3 -m unittest discover -v -s tests -p check_simulated_data.py
+```
+
 A test skipped with "RTÉ data changed" means RTÉ no longer offers that kind of item at all (for example, no more older-system radio episodes). That is not a plugin failure.
