@@ -41,9 +41,20 @@ To check it's installed, run `yt-dlp -v` with any URL. The output should include
 
 DRM-protected items (RTÉ Player, live TV) are not supported. Items only available in Ireland give "This video is only available in Ireland" elsewhere.
 
+## Structure
+
+```
+yt-dlp-rte-video/
+├── yt_dlp_plugins/extractor/rte_video.py   # the whole plugin, loaded by yt-dlp from this path: rte:video and
+│                                           # rte:video:category (rte.ie/video), rte:avgen (radio, news and archive
+│                                           # items), rte:archives (archive pages), rte:radio:programme (playlists)
+└── tests/                                  # run with `python3 -m unittest discover -s tests`, which finds the
+                                            # test_*.py files; shared code in rte_helpers.py
+```
+
 ## Tests
 
-`tests/` holds a standard-library `unittest` suite. yt-dlp never loads it. It runs yt-dlp against this checkout only. It compares the results with RTÉ's own data, fetched separately with `curl`.
+`tests/` holds a standard-library `unittest` suite of about 70 tests, which takes about 6 minutes to run. yt-dlp never loads it. It runs yt-dlp against this checkout only. It compares the results with RTÉ's own data, fetched separately with `curl`, and with a few values read by hand from RTÉ's pages.
 
 Run it from the repository root:
 
@@ -54,11 +65,12 @@ python3 -m unittest discover -v -s tests
 The tests are kept lean. They don't download media files or walk through very long listings.
 
 Options:
-- `YTDLP=<path>` chooses the yt-dlp to test (default: `/usr/local/bin/yt-dlp`).
+- `YTDLP=<path>` chooses the yt-dlp to test (default: `/usr/local/bin/yt-dlp`). The tests that simulate RTÉ server errors and timeouts need yt-dlp's standard zipapp build, and are skipped with any other build.
 - `RTE_TESTS_IN_IRELAND=1` skips the geo-block test.
+- `RTE_TESTS_TIMEOUT=<seconds>` sets the time limit for each yt-dlp run (default: 600).
 
 What it tests:
-- every URL format above, including URL variants (case, trailing slash, query string);
+- every URL format above, and variants of programme URLs (case, trailing slash, `http`, no `www`, query string);
 - metadata against RTÉ's data: title, dates (including Irish summer time), duration, station, `media_type`, release dates of archive items;
 - playlists: size limits, page boundaries, order, no duplicates, `-I` ranges, date filters and `--break-on-existing`;
 - one download-archive key per item, whichever URL it is reached by;

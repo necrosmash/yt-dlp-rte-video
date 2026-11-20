@@ -147,6 +147,17 @@ class _RteBaseIE(InfoExtractor):
 
 
 class _RteVideoBaseIE(_RteBaseIE):
+    """rte.ie/video items, which RTE hosts on thePlatform (also called mpx).
+
+    How an item is fetched:
+      1. feed entry: one JSON object per item from thePlatform's feed (_FEED), asked for by guid
+         ('epic-mpx-manual-<number>' for rte.ie/video items) or by category/date for listings;
+      2. metadata: the entry's fields are mapped to yt-dlp's fields (_entry_metadata);
+      3. stream: the entry's media URL returns a SMIL document (XML), which needs a token from
+         RTE's anonymous login; it holds either the HLS stream URL or an error such as
+         GeoLocationBlocked (_extract_entry);
+      4. formats: the HLS playlist lists the available qualities.
+    """
     # Values from the config of RTE's embed player (www.rte.ie/media-embed/dustin/main-*.js):
     # DUSTINP_ENTERTAINMENT_FEED, DUSTIN_PID_LOOKUP, DUSTIN_APP_RTE_SL_ANON_LOGIN_URL,
     # DUSTIN_APP_CONTENT_PROTECTION_ACCOUNT
@@ -186,6 +197,19 @@ class _RteVideoBaseIE(_RteBaseIE):
         return f'mpx-{guid}' if guid.isdigit() else guid
 
     def _entry_metadata(self, entry):
+        """Maps one raw feed entry to yt-dlp's metadata fields (no network requests).
+
+        feed field                       -> yt-dlp field
+        guid                             -> id (rte.ie/video number), display_id (full guid)
+        title, plprogram$longDescription -> title, description
+        plprogram$runtime (seconds)      -> duration (0 means unknown)
+        rte$broadcastDate (ms since 1970)-> timestamp
+        rte$defaultThumbnail             -> thumbnail
+        plprogram$tags (scheme epic/category -> categories; other schemes -> tags)
+        plprogram$programType            -> media_type
+        plprogram$ratings ('GA')         -> age_limit 0
+        rte$licenceGeos (WW/ROI/IOI)     -> rte_licence (custom field; ROI/IOI = Ireland only)
+        """
         tags = traverse_obj(entry, ('plprogram$tags', lambda _, v: v['plprogram$title']))
         categories = [t['plprogram$title'] for t in tags if t.get('plprogram$scheme') in ('epic', 'category')]
         other_tags = [t['plprogram$title'] for t in tags if t.get('plprogram$scheme') not in ('epic', 'category', 'subCategory')]
@@ -208,6 +232,8 @@ class _RteVideoBaseIE(_RteBaseIE):
         }
 
     def _extract_entry(self, entry):
+        """Full extraction of one feed entry: its metadata plus formats from the SMIL/HLS stream.
+        Stops with yt-dlp's DRM error for protected items and its geo error for Ireland-only ones."""
         info = self._entry_metadata(entry)
         video_id = info['id']
         media = traverse_obj(entry, ('plprogramavailability$media', 0, {dict})) or {}
@@ -262,6 +288,8 @@ class RteVideoIE(_RteVideoBaseIE):
     }]
 
     def _real_extract(self, url):
+        # Two routes to the same feed entry: /video/id/<number> gives the guid directly; an embed's
+        # player ID (pid) is first resolved to a guid with thePlatform's PID lookup
         mobj = self._match_valid_url(url).groupdict()
         video_id, pid = mobj.get('id'), mobj.get('pid')
         if pid:
@@ -296,6 +324,12 @@ class RteVideoCategoryIE(_RteVideoBaseIE):
     }]
 
     def _entries(self, category):
+        """Playlist entries, newest first, fetched lazily 100 at a time from the feed.
+
+        Each feed entry becomes a lightweight playlist entry (a link to its /video/id/ page plus the
+        metadata already in the feed), so filters such as --dateafter or --match-filter work
+        without opening each item. The feed also holds RTE Player clips; only rte.ie/video items
+        (guid 'epic-mpx-manual-...') are kept. The feed refuses to go past 1,000 items."""
         seen = set()
         for page in itertools.count():
             start = page * self._PAGE_SIZE + 1
@@ -401,6 +435,22 @@ class RteAvgenIE(_RteBaseIE):
         return show.get('medium') or traverse_obj(show, ('media:group', 0, 'medium', {str}))
 
     def _real_extract(self, url):
+        """One item from RTE's older lookup ('getplaylist'), which answers with a 'show' object.
+
+        show field                              -> yt-dlp field
+        media:group[0].hls_server + hls_url     -> HLS formats (audio-only for radio)
+        url (when an .mp3)                      -> an extra mp3 format
+        media:group[0].iscopyprotected          -> DRM error
+        title, description                      -> title, description (radio: falls back to the
+                                                   description on the item's rte.ie page)
+        duration (ms)                           -> duration
+        published (Irish local time)            -> timestamp; also release_timestamp for episodes
+        channelid                               -> channel (station name, from RTE's id, not the URL)
+        channel / provider                      -> uploader
+        series, or ptitle for older radio items -> series
+        genre                                   -> categories
+        medium, channelid, episode_id, form     -> media_type: episode or clip (rule below)
+        """
         mobj = self._match_valid_url(url).groupdict()
         item_id = self._normalise_id(mobj['id'])
         show = self._lookup(item_id)
@@ -529,9 +579,13 @@ class RteArchivesIE(_RteBaseIE):
         return {'release_year': year} if year else {}
 
     def _real_extract(self, url):
+        # An archive page is a wrapper: the media comes from its embedded player (rte:avgen or
+        # rte:video), while the page itself supplies title, description, keywords (as tags) and
+        # the broadcast date from its caption. With one embed these page fields are layered over
+        # the embed's own metadata (url_transparent); with several, the page becomes a playlist.
         page_id = self._match_id(url)
         webpage = self._download_webpage(url, page_id)
-        embeds = [*RteAvgenIE._extract_embed_urls(url, webpage), *RteVideoIE._extract_embed_urls(url, webpage)]
+        embeds =[*RteAvgenIE._extract_embed_urls(url, webpage), *RteVideoIE._extract_embed_urls(url, webpage)]
         embeds = list(dict.fromkeys(embeds))
         if not embeds:
             raise ExtractorError('No video found on this page', expected=True)
@@ -554,6 +608,10 @@ class RteArchivesIE(_RteBaseIE):
 
 
 class RteRadioProgrammeIE(_RteBaseIE):
+    """A radio programme as a playlist, from RTE's list behind the programme's /episodes/ or
+    /clips/ page (JSON, 100 items per page, newest first). Each list item becomes a lightweight
+    playlist entry pointing at the item's own URL (handled by rte:avgen), carrying the date and
+    title from the list so that date filters and --break-on-existing work without opening items."""
     IE_NAME = 'rte:radio:programme'
     IE_DESC = 'RTÉ radio programme pages: all episodes (or, for <programme>/clips/, all clips), newest first'
     _VALID_URL = r'https?://(?:www\.)?rte\.ie/radio/(?P<station>[\w-]+)/(?P<id>(?!clips(?:[/?#]|$))[\w-]+)(?:/(?P<kind>episodes|clips))?/?(?:[?#]|$)'
@@ -585,11 +643,22 @@ class RteRadioProgrammeIE(_RteBaseIE):
         return traverse_obj(data, ('programmes', lambda _, v: v.get('id') or v.get('itemid'))) or None
 
     def _item_timestamp(self, item):
+        # 'published' (Irish local time) first; BroadcastDateUnixTime when that is missing
         return (self._irish_timestamp(item.get('published'))
                 or (lambda t: t if t and t > 0 else None)(int_or_none(item.get('BroadcastDateUnixTime'))))
 
     def _entry(self, item, station, programme, kind):
-        item_id = self._normalise_id(item.get('id') or item['itemid'])
+        """Maps one raw list item to a playlist entry.
+
+        list field                         -> entry field
+        id (or itemid)                     -> id and the item's URL (episode page or clip page)
+        title                              -> title
+        published / BroadcastDateUnixTime  -> timestamp, upload_date (and release date for episodes)
+        duration (ms)                      -> duration (newer items only; wrong for older ones)
+        programme_title                    -> series
+        channelid                          -> channel (station name)
+        """
+        item_id =self._normalise_id(item.get('id') or item['itemid'])
         timestamp = self._item_timestamp(item)
         is_episode = kind == 'episodes'
         item_url = (f'https://www.rte.ie/radio/{station}/{programme}/episodes/{item_id}/' if is_episode
@@ -609,6 +678,11 @@ class RteRadioProgrammeIE(_RteBaseIE):
         # EXPERIMENTAL, off by default (enable with --extractor-args "rteradioprogramme:fill_gaps=yes").
         # Finds episodes that RTE's own episode list skips between two of its pages by searching
         # RTE's older ID sequence for each missing day, and yields them marked rte_gap_filled=True.
+        # Outline: take the last older-system item before the gap and the first after it; learn the
+        # programme's weekdays and broadcast time from the older page; estimate how many IDs RTE
+        # gives out per day; then, for each expected broadcast day, guess an ID and probe the IDs
+        # around it in RTE's lookup until one matches the programme, station and day. The number
+        # of lookups per gap is capped.
         def numeric(items):
             return sorted((i for i in items if str(i.get('id') or i.get('itemid')).isdigit()),
                           key=lambda i: int(i.get('id') or i['itemid']))
@@ -718,6 +792,8 @@ class RteRadioProgrammeIE(_RteBaseIE):
         yield from reversed(found)  # newest first, like the rest of the list
 
     def _entries(self, station, programme, kind, first_page):
+        """Pages through RTE's list lazily (page 1 is already fetched), yielding each item once.
+        The list ends with a short page or an empty one."""
         fill_gaps = (kind == 'episodes'
                      and self._configuration_arg('fill_gaps', ['no'])[0] in ('yes', 'true', '1', 'on'))
         seen, previous = set(), None
@@ -741,6 +817,8 @@ class RteRadioProgrammeIE(_RteBaseIE):
         mobj = self._match_valid_url(url)
         station, programme = (s.lower() for s in mobj.group('station', 'id'))
         kind = mobj.group('kind') or 'episodes'
+        # The programme page is only used for the playlist's name, description and image (from
+        # its schema.org 'Show' data); the items come from RTE's JSON list
         webpage = self._download_webpage(
             f'https://www.rte.ie/radio/{station}/{programme}/', programme, fatal=False) or ''
         json_ld = list(self._yield_json_ld(webpage, programme, fatal=False))
