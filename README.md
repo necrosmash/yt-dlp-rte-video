@@ -2,6 +2,27 @@
 
 A yt-dlp plugin for DRM-free video and audio on rte.ie.
 
+## Install
+
+Put this whole folder (the one containing `yt_dlp_plugins/`) into any of yt-dlp's plugin locations:
+
+| Location | Path |
+|---|---|
+| User, Linux/macOS (recommended) | `${XDG_CONFIG_HOME:-~/.config}/yt-dlp/plugins/yt-dlp-rte-video/` |
+| User, Windows (recommended) | `%APPDATA%\yt-dlp\plugins\yt-dlp-rte-video\` |
+| User, other | `${XDG_CONFIG_HOME}/yt-dlp-plugins/…`, `%APPDATA%\yt-dlp-plugins\…`, `~/.yt-dlp/plugins/…`, `~/yt-dlp-plugins/…` |
+| System-wide | `/etc/yt-dlp/plugins/…` or `/etc/yt-dlp-plugins/…` |
+| Next to the yt-dlp executable (portable) | `<folder of yt-dlp>/yt-dlp-plugins/yt-dlp-rte-video/` |
+| One run only | `yt-dlp --plugin-dirs <folder containing yt-dlp-rte-video> …` |
+
+For example:
+
+```bash
+git clone <this repository> ~/.config/yt-dlp/plugins/yt-dlp-rte-video
+```
+
+To check it's installed, run `yt-dlp -v` with any URL. The output should include `[debug] Extractor Plugins: RteArchivesIE, RteAvgenIE, RteRadioProgrammeIE, RteVideoCategoryIE, RteVideoIE`.
+
 ## Supported URLs
 
 | URL format | Example |
