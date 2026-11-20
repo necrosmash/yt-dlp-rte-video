@@ -80,8 +80,9 @@ atexit.register(_report_stats)
 _CAN_WRAP = os.path.isfile(YTDLP) and zipfile.is_zipfile(YTDLP)
 
 # Runs yt-dlp's own main() from the zipapp, unchanged, but counts requests per host and can
-# inject faults (HTTP status or timeout) for URLs matching a regex. Used for every run when
-# $YTDLP is a zipapp (the normal pip-less install); otherwise yt-dlp is executed directly.
+# replace the response for URLs matching a regex: an HTTP error status, a timeout, or a
+# hand-written body (simulated RTÉ data). Used for every run when $YTDLP is a zipapp (the
+# normal pip-less install); otherwise yt-dlp is executed directly.
 _WRAPPER = r'''
 import io, json, os, re, sys, urllib.parse, urllib.request
 sys.path.insert(0, os.environ['RTE_TEST_YTDLP'])
@@ -110,6 +111,9 @@ def urlopen(self, req):
             f['hits'] = f.get('hits', 0) + 1
             if f['status'] == 'timeout':
                 raise TransportError('injected timeout (test fault)')
+            if 'body' in f:
+                return Response(io.BytesIO(f['body'].encode()), url,
+                                {'Content-Type': f.get('type', 'application/json; charset=utf-8')}, status=f['status'])
             raise HTTPError(Response(io.BytesIO(b'injected by test'), url, {}, status=f['status'], reason='Injected'))
     return _orig(self, req)
 YoutubeDL.urlopen = urlopen
@@ -184,6 +188,45 @@ def ytdlp(*args, plugins=True, faults=None, timeout=TIMEOUT, cwd=None):
             pass
         os.unlink(counter)
     return YtdlpResult(args, proc, faults_left)
+
+
+def simulate(match, body, *, status=200, content_type=None):
+    """A response replacement for ytdlp(faults=[...]): every request whose URL matches the regex
+    `match` gets `body` (a dict/list is sent as JSON) instead of RTÉ's real answer."""
+    fault = {'match': match, 'status': status, 'times': -1,
+             'body': body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)}
+    if content_type:
+        fault['type'] = content_type
+    return fault
+
+
+# Hand-written RTÉ data in RTÉ's formats as seen in November 2026 (see tests that use them).
+SIM_MP3 = 'https://traffic.omny.fm/d/clips/simulated/audio.mp3'  # listed as a format, never fetched
+
+
+def sim_show(item_id, **fields):
+    """A getplaylist answer (rteavgen) for one item: {"shows": [show]}. Defaults describe a
+    Radio 1 audio clip of the newer kind; `fields` override or add (None removes a field)."""
+    show = {
+        'itemid': item_id, 'ptitle': 'Simulated programme', 'title': 'Simulated item',
+        'series': 'Simulated programme', 'description': 'Simulated description.',
+        'published': '2026-01-15T12:00:00Z', 'channel': 'RTÉ Radio 1', 'genre': None,
+        'url': SIM_MP3, 'duration': 600000, 'channelid': '9', 'provider': None,
+        'thumbnail': 'https://www.rte.ie/images/simulated-512.jpg', 'medium': 'audio',
+    }
+    show.update(fields)
+    return {'shows': [{k: v for k, v in show.items() if v is not None}]}
+
+
+def sim_list_item(item_id, title, published, **fields):
+    """One item of an episodes/json or clips/json list, in RTÉ's format."""
+    item = {
+        'id': item_id, 'itemid': item_id, 'published': published, 'duration': 600000,
+        'channel_name': 'RTÉ Radio 1', 'media_medium': 'audio', 'channelid': '9',
+        'programme_title': 'Simulated programme', 'title': title,
+    }
+    item.update(fields)
+    return item
 
 
 def info(url, *extra, **kw):
@@ -287,6 +330,82 @@ def og(html, prop):
         m = re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']', html)
     import html as _html
     return _html.unescape(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------------------------
+# Live examples: current items picked from RTÉ's own listings on every run, so no test depends on
+# a particular item still existing. Each returns None only if RTÉ no longer offers that kind of
+# item at all.
+
+EMBED_RE = r'(?:data-)?src="([^"]*(?:bosco/components/player/iframe\.html|media-embed/dustin/?)\?[^"]*)"'
+NEWS_FEED = 'https://www.rte.ie/feeds/rss/?index=/news/'
+
+
+def embeds_in(html):
+    """Embedded RTÉ player URLs in a page, in page order, without duplicates."""
+    import html as _html
+    return list(dict.fromkeys(_html.unescape(u) for u in re.findall(EMBED_RE, html or '')))
+
+
+def embed_query(url):
+    return dict(re.findall(r'[?&](\w+)=([^&#]*)', url))
+
+
+def live_news_articles(want=3, scan=25):
+    """Up to `want` current news articles with embedded video, from RTÉ's news RSS feed:
+    [(url, html, embed URLs)]."""
+    status, rss = curl(NEWS_FEED)
+    found = []
+    for url in list(dict.fromkeys(re.findall(r'https://www\.rte\.ie/news/[^<"\s]+/\d+-[\w-]+/', rss or '')))[:scan]:
+        _, page = curl(url)
+        emb = embeds_in(page)
+        if emb:
+            found.append((url, page, emb))
+            if len(found) >= want:
+                break
+    return found
+
+
+def live_archive_pages(want=3, scan=10):
+    """Up to `want` archive pages linked from RTÉ Archives' home page that embed a player:
+    [(url, html, embed URLs)]."""
+    status, home = curl('https://www.rte.ie/archives/')
+    found = []
+    for path in list(dict.fromkeys(re.findall(r'/archives/\d{4}/\d{4}/\d+-[\w-]+/', home or '')))[:scan]:
+        url = f'https://www.rte.ie{path}'
+        _, page = curl(url)
+        emb = embeds_in(page)
+        if emb:
+            found.append((url, page, emb))
+            if len(found) >= want:
+                break
+    return found
+
+
+def live_numeric_item(station='radio1', programme='news-at-one', pages=range(2, 12)):
+    """A current older-system (numeric ID) episode that RTÉ still serves: the first numeric item
+    on the programme's list pages that getplaylist resolves. Returns (list item, show) or None."""
+    for page in pages:
+        status, items = programme_page(station, programme, 'episodes', page)
+        if status != 200 or not items:
+            return None
+        for item in [i for i in items if str(i.get('id') or '').isdigit()][:3]:
+            _, show, _ = avgen(norm_id(item['id']))
+            if show:
+                return item, show
+    return None
+
+
+def live_uuid_episode(station='radio1', programme='news-at-one'):
+    """The newest newer-system (UUID) episode of a programme, from its episode list."""
+    _, items = programme_page(station, programme, 'episodes', 1)
+    return next((str(i['id']) for i in items or [] if not str(i['id']).isdigit()), None)
+
+
+def live_uuid_clip(station='radio1', programme='morning-ireland'):
+    """The newest clip of a programme, from its clip list."""
+    _, items = programme_page(station, programme, 'clips', 1)
+    return str(items[0]['id']) if items else None
 
 
 # ---------------------------------------------------------------------------------------------

@@ -1,35 +1,43 @@
 """Vanilla/built-in boundaries.
 
 * Every URL type the plugin supports is still unsupported by vanilla yt-dlp (plugins off), so an
-  upstream change is noticed.
-* The plugin does not take over URLs of yt-dlp's built-in rte / rte:radio extractors.
+  upstream change is noticed. The example URLs are current ones picked from RTÉ's own listings.
+* The plugin does not take over URLs of yt-dlp's built-in rte / rte:radio extractors, and its
+  class names never replace a built-in extractor.
 """
+import ast
+import os
 import re
+import subprocess
+import sys
 import unittest
+import zipfile
 
-from rte_helpers import GUID_PREFIX, RteTestCase, feed_entries, programme_page, ytdlp
+from rte_helpers import (
+    GUID_PREFIX, REPO_ROOT, YTDLP, RteTestCase, embed_query, feed_entries, live_archive_pages,
+    live_news_articles, live_numeric_item, live_uuid_clip, live_uuid_episode, norm_id, ytdlp,
+)
 
-PINNED_URLS = {
-    'news article': 'https://www.rte.ie/news/courts/2026/1110/1598687-josie-ray-nenagh-trial/',
-    'archive page': 'https://www.rte.ie/archives/2016/0608/794170-21st-cork-film-festival/',
-    'radio clip (numeric)': 'https://www.rte.ie/radio/radio1/clips/10507902/',
+# Programme pages of RTÉ's long-running flagship programmes (the playlist URL types)
+PROGRAMME_URLS = {
     'radio programme page': 'https://www.rte.ie/radio/radio1/morning-ireland/',
     'radio programme episodes page': 'https://www.rte.ie/radio/radio1/morning-ireland/episodes/',
-    'radio programme clips page': 'https://www.rte.ie/radio/2fm/control/clips/',
-    'Bosco embed (numeric)': 'https://www.rte.ie/bosco/components/player/iframe.html?clipid=22640012',
-    'dustin embed (numeric)': 'https://www.rte.ie/media-embed/dustin/?id=11673745',
+    'radio programme clips page': 'https://www.rte.ie/radio/radio1/morning-ireland/clips/',
     'rte.ie/video category': 'https://www.rte.ie/video/category/News/',
     'rte.ie/video all': 'https://www.rte.ie/video/',
 }
 
+# URL formats of yt-dlp's built-in RTÉ extractors; matched by URL alone, so they never expire
 BUILTIN = {
     'rte': 'http://www.rte.ie/player/ie/show/iwitness-862/10478715/',
     'rte:radio': 'http://www.rte.ie/radio/utils/radioplayer/rteradioweb.html#!rii=16:10507902:2414:27-12-2015:',
 }
 
+PLUGIN_FILE = os.path.join(REPO_ROOT, 'yt_dlp_plugins', 'extractor', 'rte_video.py')
 
-def _dynamic_urls():
-    urls = {}
+
+def _live_urls():
+    urls = dict(PROGRAMME_URLS)
     entries = feed_entries({'range': '1-30', 'byTags': 'epic:News'},
                            'guid,plprogramavailability$media.plmedia$publicUrl')
     epic = [e for e in entries if e['guid'].startswith(GUID_PREFIX)]
@@ -38,16 +46,28 @@ def _dynamic_urls():
         pub = (epic[0].get('plprogramavailability$media') or [{}])[0].get('plmedia$publicUrl') or ''
         if '/media/' in pub:
             urls['dustin embed (letter id)'] = f'https://www.rte.ie/media-embed/dustin/?id={pub.rsplit("/", 1)[1]}'
-    _, eps = programme_page('radio1', 'news-at-one')
-    uuid_eps = [i for i in eps or [] if not str(i['id']).isdigit()]
-    if uuid_eps:
-        uid = uuid_eps[0]['id']
-        urls['radio episode (UUID)'] = f'https://www.rte.ie/radio/radio1/news-at-one/episodes/{uid}/'
-        urls['radio /clips/ URL of an episode'] = f'https://www.rte.ie/radio/radio1/clips/{uid}/'
-        urls['Bosco embed (UUID)'] = f'https://www.rte.ie/bosco/components/player/iframe.html?clipid={uid}'
-    _, clips = programme_page('radio1', 'morning-ireland', 'clips')
-    if clips:
-        urls['radio clip (UUID)'] = f'https://www.rte.ie/radio/radio1/clips/{clips[0]["id"]}/'
+    ep = live_uuid_episode()
+    if ep:
+        urls['radio episode (UUID)'] = f'https://www.rte.ie/radio/radio1/news-at-one/episodes/{ep}/'
+        urls['radio /clips/ URL of an episode'] = f'https://www.rte.ie/radio/radio1/clips/{ep}/'
+        urls['Bosco embed (UUID)'] = f'https://www.rte.ie/bosco/components/player/iframe.html?clipid={ep}'
+    clip = live_uuid_clip()
+    if clip:
+        urls['radio clip (UUID)'] = f'https://www.rte.ie/radio/radio1/clips/{clip}/'
+    numeric = live_numeric_item()
+    if numeric:
+        urls['radio clip (numeric)'] = f'https://www.rte.ie/radio/radio1/clips/{norm_id(numeric[0]["id"])}/'
+    articles = live_news_articles(want=1)
+    if articles:
+        urls['news article'] = articles[0][0]
+    pages = live_archive_pages(want=1)
+    if pages:
+        urls['archive page'] = pages[0][0]
+        ids = [embed_query(e).get('id', '') for e in pages[0][2]]
+        num = next((i for i in ids if i.isdigit() and len(i) >= 4), None)
+        if num:
+            urls['dustin embed (numeric)'] = f'https://www.rte.ie/media-embed/dustin/?id={num}'
+            urls['Bosco embed (numeric)'] = f'https://www.rte.ie/bosco/components/player/iframe.html?clipid={num}'
     return urls
 
 
@@ -56,7 +76,7 @@ class TestVanillaStillUnsupported(RteTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.urls = {**PINNED_URLS, **_dynamic_urls()}
+        cls.urls = _live_urls()
 
     def test_vanilla_unsupported(self):
         """yt-dlp without plugins still lacks these URLs; if this fails, yt-dlp may now support them itself."""
@@ -73,10 +93,12 @@ class TestVanillaStillUnsupported(RteTestCase):
                 # and no built-in extractor claims it
                 self.assertNotRegex(res.stderr, r'\[rte(?::radio)?\] ', f'built-in rte extractor claimed {url}')
 
-    def test_dynamic_urls_found(self):
-        """Current example URLs could be picked from RTÉ's data (otherwise the vanilla check is incomplete)."""
-        missing = {'rte.ie/video clip', 'radio episode (UUID)', 'radio clip (UUID)'} - set(self.urls)
-        self.assertFalse(missing, f'could not pick current URLs from RTÉ data for: {missing}')
+    def test_live_urls_found(self):
+        """Current example URLs of every supported kind could be picked from RTÉ's listings."""
+        wanted = {'rte.ie/video clip', 'dustin embed (letter id)', 'radio episode (UUID)', 'radio clip (UUID)',
+                  'radio clip (numeric)', 'news article', 'archive page', 'dustin embed (numeric)'}
+        missing = wanted - set(self.urls)
+        self.skipIfRte(missing, f'no current example could be found for: {sorted(missing)}')
 
 
 class TestBuiltinNotTakenOver(RteTestCase):
@@ -88,6 +110,23 @@ class TestBuiltinNotTakenOver(RteTestCase):
                 self.assertRegex(res.stderr, rf'\[{re.escape(ie)}\] ', f'{ie} did not handle {url}\n{res.describe()}')
                 self.assertNotRegex(res.stderr, r'\[rte:(?:video|avgen|archives|radio:programme)',
                                     f'a plugin extractor claimed the built-in URL {url}\n{res.describe()}')
+
+    def test_plugin_class_names_not_used_by_builtins(self):
+        """Plugin class names never clash with (and so replace) a built-in yt-dlp extractor."""
+        if not (os.path.isfile(YTDLP) and zipfile.is_zipfile(YTDLP)):
+            self.skipTest('needs $YTDLP to be the yt-dlp zipapp')
+        with open(PLUGIN_FILE, encoding='utf-8') as f:
+            tree = ast.parse(f.read())
+        plugin = {n.name for n in tree.body if isinstance(n, ast.ClassDef) and n.name.endswith('IE')}
+        self.assertTrue(plugin, 'no extractor classes found in the plugin file')
+        code = ('import sys; sys.path.insert(0, sys.argv[1]);'
+                'from yt_dlp.extractor import gen_extractor_classes;'
+                'print("\\n".join(c.__name__ for c in gen_extractor_classes()))')
+        out = subprocess.run([sys.executable, '-c', code, YTDLP], capture_output=True, text=True,
+                             env={**os.environ, 'YTDLP_NO_PLUGINS': '1'}, timeout=300)
+        builtin = set(out.stdout.split())
+        self.assertIn('RteIE', builtin, f'built-in list not read: {out.stderr[-500:]}')
+        self.assertFalse(plugin & builtin, f'plugin class names also used by built-in extractors: {plugin & builtin}')
 
 
 if __name__ == '__main__':

@@ -1,14 +1,16 @@
 """Radio programme playlists (rte:radio:programme).
 
 Expected values come from RTÉ's episodes/json and clips/json (curl). Some tests inject faults
-(HTTP 500, 404, timeouts) into yt-dlp's requests for one URL; everything else is real RTÉ traffic."""
+(HTTP 500, 404, timeouts) into yt-dlp's requests for one URL, and some replace one list with
+simulated data; everything else is real RTÉ traffic."""
 import os
 import re
 import tempfile
 import unittest
 
 from rte_helpers import (
-    RteTestCase, clean, curl, flat, info, norm_id, og, programme_page, stations, ts_from_rte, utc_date, ytdlp,
+    RteTestCase, clean, curl, flat, info, norm_id, og, programme_page, sim_list_item, simulate, stations,
+    ts_from_rte, utc_date, ytdlp,
 )
 
 NAO = 'https://www.rte.ie/radio/radio1/news-at-one/'
@@ -39,18 +41,6 @@ def _expected_entry(item, station, programme, kind):
         'channel': st[cid][1] if cid in st else None,
     }
 
-
-def _all_pages(station, programme, kind='episodes', limit=200):
-    items, statuses = [], []
-    for page in range(1, limit + 1):
-        status, page_items = programme_page(station, programme, kind, page)
-        statuses.append(status)
-        if status != 200 or not page_items:
-            break
-        items += page_items
-        if len(page_items) < 100:
-            break
-    return items, statuses
 
 
 class ProgrammeCase(RteTestCase):
@@ -207,49 +197,70 @@ class TestNewsAtOne(ProgrammeCase):
 
 
 class TestOtherProgrammes(ProgrammeCase):
-    def test_empty_episode_lists_error(self):
-        """Programmes whose list RTÉ leaves empty give a clear error (no guessing from other sources)."""
-        for station, programme, kind in [('gold', 'bon-jovi-the-greatest-songs', 'episodes'),
-                                         ('rnag', 'an-tamhran-is-ansa-linn', 'episodes'),
-                                         ('2fm', 'control', 'episodes'),
-                                         ('gold', 'bon-jovi-the-greatest-songs', 'clips')]:
-            with self.subTest(programme=programme, kind=kind):
-                status, items = programme_page(station, programme, kind)
-                self.skipIfRte(items, f'{programme} {kind}/json now has items')
-                url = f'https://www.rte.ie/radio/{station}/{programme}/' + ('clips/' if kind == 'clips' else '')
-                res = ytdlp('--flat-playlist', url)
-                self.assertErrorContains(res, f'RTÉ has no {kind[:-1]} list for this programme')
-
     def test_clips_playlist(self):
-        """<programme>/clips/ gives the programme's clips as their own playlist."""
-        raw, statuses = _all_pages('2fm', 'control', 'clips')
-        self.skipIfRte(not raw, f'2fm/control clips/json returned {statuses}')
-        pl, res = flat('https://www.rte.ie/radio/2fm/control/clips/')
-        self.assertOk(res)
-        self.assertRte('playlist id', 'control-clips', pl.get('id'), 'documented: <programme>-clips')
-        self.assertTrue((pl.get('title') or '').endswith(' (clips)'), pl.get('title'))
-        self.check_entries(pl['entries'], raw, '2fm', 'control', 'clips')
-        for e in pl['entries']:
-            self.assertEqual(e.get('media_type'), 'clip')
-            # RTÉ's placeholder dates (0001-01-01, negative unix times) are no dates
-            self.assertTrue(e.get('timestamp') is None or e['timestamp'] > 0)
-
-    def test_large_clips_playlist_first_page(self):
-        """A busy programme's clips playlist starts with RTÉ's newest clips."""
+        """<programme>/clips/ gives the programme's clips as their own playlist, newest first."""
         _, raw = programme_page('radio1', 'morning-ireland', 'clips')
         self.skipIfRte(not raw, 'no Morning Ireland clips')
-        pl, res = flat('https://www.rte.ie/radio/radio1/morning-ireland/clips/', '-I', '1:3')
+        pl, res = flat('https://www.rte.ie/radio/radio1/morning-ireland/clips/', '-I', '1:5')
         self.assertOk(res)
-        self.assertEqual(pl.get('id'), 'morning-ireland-clips')
-        self.check_entries(pl['entries'], raw[:3], 'radio1', 'morning-ireland', 'clips')
+        self.assertRte('playlist id', 'morning-ireland-clips', pl.get('id'), 'documented: <programme>-clips')
+        self.assertTrue((pl.get('title') or '').endswith(' (clips)'), pl.get('title'))
+        self.check_entries(pl['entries'], raw[:5], 'radio1', 'morning-ireland', 'clips')
+        for e in pl['entries']:
+            self.assertEqual(e.get('media_type'), 'clip')
+            self.assertIsNone(e.get('release_date'), 'clips have no release date')
 
-    def test_small_programme_complete(self):
-        """A small programme is listed completely and ends cleanly."""
-        raw, statuses = _all_pages('radio1', 'a-poets-place')
-        self.skipIfRte(not raw, f'a-poets-place returned {statuses}')
-        pl, res = flat('https://www.rte.ie/radio/radio1/a-poets-place/')
+
+SIM_PROGRAMME = 'https://www.rte.ie/radio/radio1/simulated-programme/'
+
+
+def _sim_list(items):
+    """An episodes/json or clips/json page in RTÉ's shape (its page counts are unreliable anyway)."""
+    return {'page': 1, 'num_pages': 1, 'num_per_page': 100, 'total_items': len(items), 'programmes': items}
+
+
+class TestSimulatedLists(ProgrammeCase):
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
+    def test_empty_lists_error(self):
+        """A programme whose list RTÉ leaves empty gives a clear error (no guessing from other sources)."""
+        for kind in ('episodes', 'clips'):
+            with self.subTest(kind=kind):
+                url = SIM_PROGRAMME + ('clips/' if kind == 'clips' else '')
+                res = ytdlp('--flat-playlist', url, faults=[
+                    simulate(rf'/radio/radio1/simulated-programme/{kind}/json/', _sim_list([]))])
+                self.assertFaultHit(res)
+                self.assertErrorContains(res, f'RTÉ has no {kind[:-1]} list for this programme')
+
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
+    def test_short_list_complete(self):
+        """A list shorter than one page is listed completely, and no further page is asked for."""
+        items = [sim_list_item(f'bbbbbbbb-0000-4000-8000-00000000000{n}', f'Simulated episode {n}',
+                               f'2026-11-0{n}T13:00:00Z') for n in (3, 2, 1)]
+        pl, res = flat(SIM_PROGRAMME, '--print-traffic', faults=[
+            simulate(r'/radio/radio1/simulated-programme/episodes/json/\?page=1$', _sim_list(items))])
+        self.assertFaultHit(res)
         self.assertOk(res)
-        self.check_entries(pl['entries'], raw, 'radio1', 'a-poets-place', 'episodes')
+        self.check_entries(pl['entries'], items, 'radio1', 'simulated-programme', 'episodes')
+        self.assertNotIn('episodes/json/?page=2', res.output, 'asked for a page after a short last page')
+
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
+    def test_placeholder_dates_are_no_dates(self):
+        """RTÉ marks unknown dates with 0001-01-01 and negative Unix times; those give no date at all."""
+        items = [sim_list_item('cccccccc-0000-4000-8000-000000000001', 'Simulated clip', '0001-01-01T00:00:00',
+                               BroadcastDateUnixTime=-62135596800)]
+        pl, res = flat(SIM_PROGRAMME + 'clips/', faults=[
+            simulate(r'/radio/radio1/simulated-programme/clips/json/\?page=1$', _sim_list(items))])
+        self.assertFaultHit(res)
+        self.assertOk(res)
+        e = pl['entries'][0]
+        self.assertIsNone(e.get('timestamp'))
+        self.assertIsNone(e.get('upload_date'))
 
     def test_non_programme_paths_error(self):
         """Radio pages that are not programmes give an error, not an empty playlist."""

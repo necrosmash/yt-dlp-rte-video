@@ -43,7 +43,9 @@ DRM-protected items (RTÉ Player, live TV) are not supported. Items only availab
 
 ## Tests
 
-`tests/` holds a standard-library `unittest` suite of about 70 tests, which takes about 6 minutes to run. yt-dlp never loads it. It runs yt-dlp against this checkout only. It compares the results with RTÉ's own data, fetched separately with `curl`, and with a few values read by hand from RTÉ's pages.
+`tests/` holds a standard-library `unittest` suite of about 70 tests, which takes about 6 minutes to run. yt-dlp never loads it. It runs yt-dlp against this checkout only. There are two kinds of test, so none depends on a particular RTÉ item still existing:
+- **Live tests** pick current items from RTÉ's own listings on every run (the News video category, News at One, Morning Ireland, the news RSS feed, the RTÉ Archives home page). They compare the plugin's results with RTÉ's data, fetched separately with `curl`.
+- **Simulated tests**, each marked `SIMULATED RTÉ DATA`, replace one RTÉ response with hand-written data in RTÉ's format. They cover cases RTÉ may not have on a given day, such as the clock changes, archive captions and unusual titles.
 
 Run it from the repository root:
 
@@ -66,4 +68,4 @@ What it tests:
 - error handling: DRM, geo-blocking, expired items, empty lists, and RTÉ server errors (injected);
 - that vanilla yt-dlp still lacks support for these URLs, and that yt-dlp's own RTÉ extractors are left alone.
 
-A test skipped with "RTÉ data changed" means an item it relies on is gone from RTÉ. That is not a plugin failure.
+A test skipped with "RTÉ data changed" means RTÉ no longer offers that kind of item at all (for example, no more older-system radio episodes). That is not a plugin failure.

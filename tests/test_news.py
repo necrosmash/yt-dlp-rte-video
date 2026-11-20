@@ -1,23 +1,18 @@
 """News articles: yt-dlp's generic extractor finds the Bosco (data-src) and dustin embeds through the
-plugin's embed patterns. Expected media come from the article HTML (curl) and RTÉ's PID lookup."""
-import html as _html
+plugin's embed patterns. Articles are current ones from RTÉ's news RSS feed; expected media come from
+the article HTML (curl) and RTÉ's PID lookup."""
 import re
 import unittest
 
-from rte_helpers import PID_LOOKUP, RteTestCase, curl, curl_json, guid_to_id, norm_id, ytdlp
-
-ARTICLES = [
-    'https://www.rte.ie/news/ireland/2026/1111/1598773-public-sector-pay-deal/',
-    'https://www.rte.ie/news/dublin/2026/1110/1598665-dublin-meeting-security/',
-    'https://www.rte.ie/news/courts/2026/1110/1598687-josie-ray-nenagh-trial/',
-]
+from rte_helpers import (
+    PID_LOOKUP, RteTestCase, curl_json, embed_query, guid_to_id, live_news_articles, norm_id, ytdlp,
+)
 
 
-def _expected_keys(page):
+def _expected_keys(embeds):
     keys = []
-    for m in re.finditer(r'(?:data-)?src="([^"]*(?:bosco/components/player/iframe\.html|media-embed/dustin/?)\?[^"]*)"', page):
-        url = _html.unescape(m.group(1))
-        q = dict(re.findall(r'[?&](\w+)=([^&#]*)', url))
+    for url in embeds:
+        q = embed_query(url)
         if 'bosco' in url and q.get('clipid'):
             keys.append(f'RteAvgen {norm_id(q["clipid"])}')
         elif q.get('id', '').isdigit() and len(q['id']) >= 4:
@@ -30,25 +25,31 @@ def _expected_keys(page):
 
 
 class TestNewsArticles(RteTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.articles = live_news_articles(want=3)
+        if not cls.articles:
+            raise unittest.SkipTest('RTÉ data changed: no article with embedded video in the news RSS feed')
+
     def test_articles(self):
-        """Every video embedded in a news article is found, and nothing else."""
-        for url in ARTICLES:
+        """Every RTÉ video embedded in a current news article is found, and nothing else."""
+        for url, _, embeds in self.articles:
             with self.subTest(url=url):
-                status, page = curl(url)
-                self.skipIfRte(status != 200, f'{url} HTTP {status}')
-                expected = _expected_keys(page)
-                self.skipIfRte(not expected, f'no embeds left on {url}')
+                expected = _expected_keys(embeds)
                 res = ytdlp('--simulate', '--ignore-no-formats-error', '--print', '%(extractor_key)s %(id)s', url)
                 self.assertNoTraceback(res)
-                got = [line for line in res.stdout.splitlines() if line.strip()]
+                # other sites' embeds (e.g. YouTube) are yt-dlp's own business; compare RTÉ's only
+                got = [line for line in res.stdout.splitlines() if line.startswith('Rte')]
                 self.assertEqual(sorted(got), sorted(expected),
                                  f'embeds on the page (RTÉ HTML + PID lookup) vs plugin\n{res.describe()}')
 
     def test_page_id_is_never_media_id(self):
         """The article's own page number is never used as a media ID."""
-        url = ARTICLES[0]
-        res = ytdlp('--simulate', '--ignore-no-formats-error', '--print', 'id', url)
-        self.assertNotIn('1598773', res.stdout.split())
+        for url, _, _ in self.articles:
+            with self.subTest(url=url):
+                page_id = re.search(r'/(\d+)-[\w-]+/?$', url).group(1)
+                res = ytdlp('--simulate', '--ignore-no-formats-error', '--print', 'id', url)
+                self.assertNotIn(page_id, res.stdout.split())
 
 
 if __name__ == '__main__':

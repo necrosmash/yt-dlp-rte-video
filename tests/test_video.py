@@ -8,7 +8,7 @@ import unittest
 
 from rte_helpers import (
     GUID_PREFIX, IN_IRELAND, RteTestCase, clean, curl, feed, feed_entries, flat, guid_to_id, info, og,
-    utc_date, ytdlp,
+    simulate, utc_date, ytdlp,
 )
 
 FIELDS = ','.join((
@@ -45,6 +45,28 @@ def _expected(entry):
         'upload_date': utc_date(ts),
         'rte_licence': entry.get('rte$licenceGeos'),
     }
+
+
+def _sim_entry(number, *, runtime=30.0, title='Simulated clip', protected=False, licence='WW'):
+    """One thePlatform feed entry in RTÉ's shape. `number` gives guid epic-mpx-manual-<number>,
+    or is used as the guid itself when it is a bare all-digit ID (an RTÉ Player item)."""
+    guid = number if len(number) <= 5 else f'{GUID_PREFIX}{number}'
+    return {
+        'guid': guid, 'title': title, 'plprogram$longDescription': '', 'plprogram$runtime': runtime,
+        'plprogram$programType': 'clip', 'plprogram$ratings': [{'plprogram$scheme': '', 'plprogram$rating': 'GA'}],
+        'plprogram$tags': [{'plprogram$scheme': 'epic', 'plprogram$title': 'Simulated'}],
+        'plprogramavailability$media': [{
+            'media$content': [{'plfile$format': 'M3U', 'plfile$isProtected': protected}],
+            'plmedia$publicUrl': 'https://link.eu.theplatform.com/s/1uC-gC/media/SimulatedPid1',
+        }],
+        'rte$broadcastDate': 1795177061000, 'rte$defaultThumbnail': 'https://www.rte.ie/images/simulated.jpg',
+        'rte$licenceGeos': licence,
+    }
+
+
+def _sim_feed(entries):
+    """A thePlatform feed answer in RTÉ's shape."""
+    return {'startIndex': 1, 'itemsPerPage': len(entries), 'entryCount': len(entries), 'entries': entries}
 
 
 def _first_playable(entries):
@@ -107,7 +129,7 @@ class TestVideoClip(RteTestCase):
 class TestVideoErrors(RteTestCase):
     @classmethod
     def setUpClass(cls):
-        # 300 newest items with few fields: protected RTÉ Player items and geo-limited items live here
+        # 300 newest clips with few fields: rte.ie/video items and RTÉ Player clips share this feed
         cls.entries = feed_entries({'range': '1-300'}, 'guid,rte$licenceGeos,plprogramavailability$media.plmedia$publicUrl,'
                                    'plprogramavailability$media.media$content.plfile$isProtected')
 
@@ -121,15 +143,19 @@ class TestVideoErrors(RteTestCase):
         # non-epic feed IDs keep their full form (e.g. PI000018974)
         self.assertIn(f'{guid_to_id(prot["guid"])}: This video is DRM protected', res.stderr)
 
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
     def test_id_guard_all_digit_non_epic(self):
         """Feed IDs that look like rte.ie/video numbers get a prefix, so two items can never share an archive key."""
-        digits = [e for e in self.entries if not e['guid'].startswith(GUID_PREFIX) and e['guid'].isdigit()]
-        if not digits:
-            self.skipTest('no all-digit non-epic guid among the newest 300 feed items; '
-                          'the ID prefix guard cannot be exercised end to end today')
-        e = digits[0]
-        d, res = info(f'https://www.rte.ie/media-embed/dustin/?id={_pid(e)}', '--ignore-no-formats-error')
-        self.assertEqual((d or {}).get('id'), f'mpx-{e["guid"]}', res.describe())
+        pid = 'SimulatedPid1'
+        entry = _sim_entry('12345', protected=True)
+        res = ytdlp('--simulate', f'https://www.rte.ie/media-embed/dustin/?id={pid}', faults=[
+            simulate(rf'rte-prd-media-pid-lookup\?bypid={pid}', {'entries': [{'guid': '12345'}]}),
+            simulate(r'prd-webplayer-programmes/\?.*byGuid=12345(?:&|$)', _sim_feed([entry])),
+        ])
+        self.assertFaultHit(res)
+        self.assertErrorContains(res, 'mpx-12345: This video is DRM protected')
 
     @unittest.skipIf(IN_IRELAND, 'geo test assumes a location outside Ireland')
     def test_geo_error_and_metadata(self):
@@ -150,17 +176,19 @@ class TestVideoErrors(RteTestCase):
             self.assertRte(key, exp[key], d.get(key), 'feed (ROI item)', url)
         self.assertRte('uploader', 'RTÉ', d.get('uploader'), 'documented behaviour')
 
-    def test_duration_zero_is_absent(self):
-        """RTÉ gives some old items a duration of 0; that means unknown, not zero seconds."""
-        old = feed_entries({'range': '1-10', 'byTags': 'epic:Lifestyle', 'sort': 'rte$broadcastDate'}, FIELDS)
-        zero = next((e for e in old if e['guid'].startswith(GUID_PREFIX)
-                     and not float(e.get('plprogram$runtime') or 0) and not _protected(e)), None)
-        if not zero:
-            self.skipTest('RTÉ data changed: no runtime-0 item among the oldest Lifestyle clips')
-        url = f'https://www.rte.ie/video/id/{guid_to_id(zero["guid"])}/'
-        d, res = info(url, '--ignore-no-formats-error')
-        self.assertTrue(d, res.describe())
-        self.assertIsNone(d.get('duration'), f'feed runtime is 0 (unknown) but the plugin gave duration {d.get("duration")}')
+    # SIMULATED RTÉ DATA: RTÉ's response is replaced with hand-written data in RTÉ's format as seen
+    # in November 2026. If RTÉ changes that format, this test can still pass while the plugin fails
+    # on real data; update the simulated data to match RTÉ's new format.
+    def test_duration_zero_and_messy_titles(self):
+        """RTÉ gives some old items a duration of 0 (unknown, not zero seconds) and some titles stray spaces."""
+        entries = [_sim_entry('9999901', runtime=0, title='  Simulated  clip  '),
+                   _sim_entry('9999902', runtime=61.5, title='Simulated &amp; clip')]
+        pl, res = flat('https://www.rte.ie/video/category/Simulated/', faults=[
+            simulate(r'prd-webplayer-programmes/\?.*byTags=epic(?:%3A|:)Simulated', _sim_feed(entries))])
+        self.assertFaultHit(res)
+        self.assertOk(res)
+        got = [(e['id'], e.get('duration'), e.get('title')) for e in pl['entries']]
+        self.assertEqual(got, [('9999901', None, 'Simulated clip'), ('9999902', 61.5, 'Simulated & clip')])
 
 
 class TestCategory(RteTestCase):
