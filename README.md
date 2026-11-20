@@ -1,10 +1,10 @@
 # yt-dlp-rte-video
 
-A yt-dlp plugin for DRM-free video and audio on rte.ie.
+A **vibe-coded** yt-dlp plugin for DRM-free video and audio on rte.ie.
 
 ## Install
 
-Put this whole folder (the one containing `yt_dlp_plugins/`) into any of yt-dlp's plugin locations:
+Put this whole folder (the one containing `yt_dlp_plugins/`) into any of yt-dlp's [plugin locations](https://github.com/yt-dlp/yt-dlp#installing-plugins):
 
 | Location | Path |
 |---|---|
