@@ -1,6 +1,6 @@
 # yt-dlp-rte-video
 
-A **vibe-coded** yt-dlp plugin for DRM-free video and audio on rte.ie.
+A yt-dlp plugin for DRM-free video and audio on rte.ie. Built with Claude.
 
 ## Install
 
@@ -18,7 +18,7 @@ Put this whole folder (the one containing `yt_dlp_plugins/`) into any of yt-dlp'
 For example:
 
 ```bash
-git clone <this repository> ~/.config/yt-dlp/plugins/yt-dlp-rte-video
+git clone https://github.com/necrosmash/yt-dlp-rte-video.git ~/.config/yt-dlp/plugins/yt-dlp-rte-video
 ```
 
 To check it's installed, run `yt-dlp -v` with any URL. The output should include `[debug] Extractor Plugins: RteArchivesIE, RteAvgenIE, RteRadioProgrammeIE, RteVideoCategoryIE, RteVideoIE`.
@@ -40,6 +40,14 @@ To check it's installed, run `yt-dlp -v` with any URL. The output should include
 | `rte.ie/bosco/components/player/iframe.html?clipid=<id>` (embed) | `yt-dlp "https://www.rte.ie/bosco/components/player/iframe.html?clipid=22640012"` |
 
 DRM-protected items (RTÉ Player, live TV) are not supported. Items only available in Ireland give "This video is only available in Ireland" elsewhere.
+
+## Options
+
+Pass with `--extractor-args "rteradioprogramme:<option>=<value>"`.
+
+| Option | Default | Effect |
+|---|---|---|
+| `fill_gaps` | `no` | **Experimental.** On radio programme episode lists, finds episodes that RTÉ's own list skips (for example, a missing week) by searching RTÉ's older item IDs for each expected broadcast day. It makes many extra requests, at most `40 × missing days + 100` per gap, and is not covered by the tests. Items it finds have `rte_gap_filled` set to `True`. |
 
 ## Tests
 
