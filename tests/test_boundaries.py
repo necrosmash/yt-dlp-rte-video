@@ -1,7 +1,7 @@
 """Vanilla/built-in boundaries.
 
 * Every URL type the plugin supports is still unsupported by vanilla yt-dlp (plugins off), so an
-  upstream change is noticed (plan: "check vanilla yt-dlp first").
+  upstream change is noticed.
 * The plugin does not take over URLs of yt-dlp's built-in rte / rte:radio extractors.
 """
 import re
@@ -52,13 +52,14 @@ def _dynamic_urls():
 
 
 class TestVanillaStillUnsupported(RteTestCase):
-    """If one of these fails, upstream yt-dlp may now support the URL type: stop and tell the user."""
+    """If one of these fails, upstream yt-dlp may now support the URL type: check whether the plugin still needs it."""
 
     @classmethod
     def setUpClass(cls):
         cls.urls = {**PINNED_URLS, **_dynamic_urls()}
 
     def test_vanilla_unsupported(self):
+        """yt-dlp without plugins still lacks these URLs; if this fails, yt-dlp may now support them itself."""
         for kind, url in self.urls.items():
             with self.subTest(kind=kind, url=url):
                 res = ytdlp('--simulate', '--flat-playlist', '-I', '1', url, plugins=False)
@@ -73,12 +74,14 @@ class TestVanillaStillUnsupported(RteTestCase):
                 self.assertNotRegex(res.stderr, r'\[rte(?::radio)?\] ', f'built-in rte extractor claimed {url}')
 
     def test_dynamic_urls_found(self):
+        """Current example URLs could be picked from RTÉ's data (otherwise the vanilla check is incomplete)."""
         missing = {'rte.ie/video clip', 'radio episode (UUID)', 'radio clip (UUID)'} - set(self.urls)
         self.assertFalse(missing, f'could not pick current URLs from RTÉ data for: {missing}')
 
 
 class TestBuiltinNotTakenOver(RteTestCase):
     def test_builtin_urls_go_to_builtin_extractors(self):
+        """URLs of yt-dlp's own RTÉ extractors are left to them, not taken over by the plugin."""
         for ie, url in BUILTIN.items():
             with self.subTest(ie=ie):
                 res = ytdlp('--simulate', url)  # the built-ins fail on these retired URLs; that is not ours

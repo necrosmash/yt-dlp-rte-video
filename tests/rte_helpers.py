@@ -45,7 +45,6 @@ def _remove_plugin_link():
 
 atexit.register(_remove_plugin_link)
 YTDLP = os.environ.get('YTDLP', '/usr/local/bin/yt-dlp')
-SLOW = os.environ.get('RTE_TESTS_SLOW') == '1'
 IN_IRELAND = os.environ.get('RTE_TESTS_IN_IRELAND') == '1'
 TIMEOUT = int(os.environ.get('RTE_TESTS_TIMEOUT', '600'))
 
@@ -54,8 +53,6 @@ PID_LOOKUP = 'https://feed.theplatform.eu/f/1uC-gC/rte-prd-media-pid-lookup'
 AVGEN = 'https://www.rte.ie/rteavgen/getplaylist/'
 STATIONS_JSON = 'https://www.rte.ie/radio/live_stations/json'
 GUID_PREFIX = 'epic-mpx-manual-'
-
-slow = unittest.skipUnless(SLOW, 'slow test: set RTE_TESTS_SLOW=1')
 
 # ---------------------------------------------------------------------------------------------
 # Request accounting (printed at the end of the run)
@@ -330,7 +327,7 @@ def norm_id(item_id):
 
 
 def expected_media_type(show):
-    """The plan's rule (Metadata fields: media_type), applied to RTÉ's getplaylist data."""
+    """The media_type rule (documented in RteAvgenIE in the plugin), applied to RTÉ's getplaylist data."""
     station_ids = set(stations())
     if avgen_medium(show) != 'audio' or int(show.get('channelid') or -1) not in station_ids:
         return 'clip'
@@ -341,7 +338,7 @@ def expected_media_type(show):
         return 'episode' if show['form'] == 'long' else 'clip'
     if not str(show.get('itemid')).isdigit():
         return 'episode'
-    return None  # undecided by the plan
+    return None  # not decided by the rule
 
 
 def guid_to_id(guid):

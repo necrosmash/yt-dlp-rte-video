@@ -26,6 +26,7 @@ EDGES = [
 
 class TestSummerTimeEdges(RteTestCase):
     def test_edges(self):
+        """Items just before and after the Irish clock changes get the right UTC time."""
         st = stations()
         for item_id, local, expected in EDGES:
             with self.subTest(id=item_id, local=local):

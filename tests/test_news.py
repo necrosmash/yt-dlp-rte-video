@@ -31,6 +31,7 @@ def _expected_keys(page):
 
 class TestNewsArticles(RteTestCase):
     def test_articles(self):
+        """Every video embedded in a news article is found, and nothing else."""
         for url in ARTICLES:
             with self.subTest(url=url):
                 status, page = curl(url)
@@ -44,6 +45,7 @@ class TestNewsArticles(RteTestCase):
                                  f'embeds on the page (RTÉ HTML + PID lookup) vs plugin\n{res.describe()}')
 
     def test_page_id_is_never_media_id(self):
+        """The article's own page number is never used as a media ID."""
         url = ARTICLES[0]
         res = ytdlp('--simulate', '--ignore-no-formats-error', '--print', 'id', url)
         self.assertNotIn('1598773', res.stdout.split())

@@ -51,7 +51,7 @@ class AvgenCase(RteTestCase):
             series = clean(show.get('series')) or clean(show.get('ptitle'))
             self.assertRte('series', series, d.get('series'), f'{src} series/ptitle', url)
         if ext:
-            self.assertRte('ext', ext, d.get('ext'), 'plan', url)
+            self.assertRte('ext', ext, d.get('ext'), 'documented behaviour', url)
         self.assertTrue(d.get('formats'), f'no formats for {url}')
         return d
 
@@ -59,27 +59,31 @@ class AvgenCase(RteTestCase):
 class TestPinnedItems(AvgenCase):
     def test_news_at_one_numeric_episode(self):
         # 1 April 2026, 13:00 Irish summer time = 12:00 UTC (gap-filling case; always reachable directly)
+        """An older (numeric) episode: Irish summer time, series name and description are right."""
         d = self.check_item('https://www.rte.ie/radio/radio1/news-at-one/episodes/11787175/', '11787175',
                             media_type='episode', release_date='20260401', ext='m4a')
         self.assertRte('timestamp', 1775044800, d.get('timestamp'), 'pinned: 2026-04-01T13:00 IST')
-        self.assertTrue(d.get('description'), 'description missing (B3)')
-        self.assertRte('series', 'News At One', d.get('series'), 'getplaylist ptitle (B4)')
+        self.assertTrue(d.get('description'), 'description missing')
+        self.assertRte('series', 'News At One', d.get('series'), 'getplaylist ptitle')
         fmts = [f for f in d['formats'] if f.get('ext') == 'm4a' or f.get('protocol', '').startswith('m3u8')]
         self.assertTrue(all(f.get('vcodec') == 'none' for f in fmts), 'audio-only HLS formats claim video')
 
     def test_episode_under_clips_url_is_episode(self):
         # RTÉ's own share link for a full Gold episode uses /clips/: media_type must still be episode
+        """RTÉ's own share links put full episodes under /clips/; they must still count as episodes."""
         d = self.check_item('https://www.rte.ie/radio/gold/clips/34788141-b67a-4ee4-b7a0-b4b4014cb486/',
                             '34788141-b67a-4ee4-b7a0-b4b4014cb486', media_type='episode',
                             release_date='20260828', ext='mp3')
         self.assertRte('channel', 'RTÉ Gold', d.get('channel'), 'stations JSON')
 
     def test_real_clip_is_clip(self):
+        """A real clip (part of an episode) is a clip, with no release date."""
         self.check_item('https://www.rte.ie/radio/rnag/clips/5f025eb2-d6d0-449a-be23-b50000d5132f/',
                         '5f025eb2-d6d0-449a-be23-b50000d5132f', media_type='clip', ext='mp3')
 
     def test_station_from_channelid_not_url_slug(self):
         # 10507902 is a lyric fm item; rte.ie serves it under any station's URL
+        """RTÉ serves an item under any station's URL; the station must come from RTÉ's data."""
         d = self.check_item('https://www.rte.ie/radio/radio1/clips/10507902/', '10507902')
         self.assertRte('channel', 'RTÉ Lyric FM', d.get('channel'), 'channelid 16 in live_stations/json')
         self.assertEqual(d.get('uploader'), 'RTÉ lyric fm', 'uploader is RTÉ\'s own value (getplaylist channel)')
@@ -88,17 +92,19 @@ class TestPinnedItems(AvgenCase):
         self.assertEqual((d2['channel'], d2['id']), (d['channel'], d['id']))
 
     def test_archive_audio_dustin_has_no_release_date(self):
-        # N1 via the dustin route: archive audio (no station) is a clip; its published date is an upload date
+        """Archive audio has no station, and its published date is an upload date, not a broadcast date."""
         d = self.check_item('https://www.rte.ie/media-embed/dustin/?id=3632796', '3632796', media_type='clip', ext='m4a')
         self.assertIsNone(d.get('release_date'))
         self.assertIsNone(d.get('release_timestamp'))
 
     def test_bosco_news_video(self):
+        """A news video embed: RTÉ's \"WEB Exclusive\" label is not used as the uploader."""
         d = self.check_item('https://www.rte.ie/bosco/components/player/iframe.html?clipid=22640012&autostart=false&app=true',
                             '22640012', media_type='clip', ext='mp4')
         self.assertEqual(d.get('uploader'), 'RTÉ', 'WEB Exclusive must be ignored')
 
     def test_trailing_space_title_trimmed(self):
+        """Some RTÉ titles end in a space or contain double spaces; titles come out clean."""
         status, show, _ = avgen('10603799')
         self.skipIfRte(not show, 'item 10603799 gone')
         d = self.check_item('https://www.rte.ie/media-embed/dustin/?id=10603799', '10603799', media_type='clip')
@@ -115,6 +121,7 @@ class TestDynamicItems(AvgenCase):
         cls.clip = str(clips[0]['id']) if clips else None
 
     def test_uuid_episode_routes(self):
+        """A current episode gives the same metadata (or archive key) via every URL that reaches it."""
         if not self.ep:
             self.skipTest('RTÉ data changed: no UUID episode on News at One page 1')
         routes = [
@@ -128,11 +135,12 @@ class TestDynamicItems(AvgenCase):
                 self.assertTrue(d.get('release_date'))
                 status, html = curl(f'https://www.rte.ie/radio/radio1/clips/{self.ep}/')
                 desc = og(html, 'og:description') or og(html, 'description')
-                self.assertTrue(d.get('description'), 'description missing (B3)')
+                self.assertTrue(d.get('description'), 'description missing')
                 if desc:
                     self.assertRte('description', desc, d.get('description'), 'radio page og:description', url)
 
     def test_uuid_clip(self):
+        """A current clip: metadata matches RTÉ's data."""
         if not self.clip:
             self.skipTest('RTÉ data changed: no clips for Morning Ireland')
         self.check_item(f'https://www.rte.ie/radio/radio1/clips/{self.clip}/', self.clip, ext='mp3')
@@ -140,6 +148,7 @@ class TestDynamicItems(AvgenCase):
 
 class TestErrorsAndInference(RteTestCase):
     def test_unknown_item_gives_rtes_message(self):
+        """An unknown item passes on RTÉ's own explanation instead of a bare HTTP 404."""
         status, show, raw = avgen(UNKNOWN_ID)
         self.skipIfRte(show is not None, f'item {UNKNOWN_ID} exists now')
         message = clean((raw or {}).get('message'))
@@ -150,6 +159,7 @@ class TestErrorsAndInference(RteTestCase):
         self.assertNotIn('HTTP Error 404', res.stderr)
 
     def test_station_roots_and_live_player_not_items(self):
+        """Station home pages and live-radio player embeds are not mistaken for items."""
         for url in ['https://www.rte.ie/radio/radio1/', 'https://www.rte.ie/radio/2fm', 'https://www.rte.ie/radio/lyricfm/',
                     'https://www.rte.ie/media-embed/dustin/?id=9&radioUI=true&pl_pillar=Radio&clipid=9',
                     'https://www.rte.ie/bosco/components/player/iframe.html?clipid=123']:
@@ -159,10 +169,12 @@ class TestErrorsAndInference(RteTestCase):
                 self.assertNoTraceback(res)
 
     def test_id_anchored(self):
+        """Junk after an item ID in the URL is not silently ignored."""
         res = ytdlp('--simulate', 'https://www.rte.ie/radio/radio1/clips/10507902abc/')
         self.assertNotIn('[rte:avgen] 10507902', res.stderr, 'trailing junk after the ID was accepted')
 
     def test_get_lookup_failure_gives_clean_error(self):
+        """If RTÉ's lookup service is down, the result is a clean error, not a crash."""
         res = ytdlp('--simulate', 'https://www.rte.ie/radio/radio1/clips/10507902/',
                     faults=[{'match': r'rteavgen/getplaylist', 'status': 503, 'times': -1}])
         self.assertFaultHit(res)
@@ -197,6 +209,7 @@ class TestArchiveKeys(RteTestCase):
                     self.assertTrue(seen, f'{url} not recognised as {key}\n{res.describe()}')
 
     def test_numeric_radio_routes(self):
+        """One older item reached through station, episode and zero-padded URLs gets one archive key."""
         self._check_routes('rteavgen 10507902', [
             'https://www.rte.ie/radio/lyricfm/clips/10507902/',
             'https://www.rte.ie/radio/radio1/clips/10507902/',
@@ -205,6 +218,7 @@ class TestArchiveKeys(RteTestCase):
         ])
 
     def test_archive_page_and_numeric_dustin(self):
+        """An archive page and the embed inside it get one archive key."""
         self._check_routes('rteavgen 10603799', [
             'https://www.rte.ie/archives/2016/0806/806509-aer-lingus-launch-glamorous-new-uniform/',
             'https://www.rte.ie/media-embed/dustin/?id=10603799',
@@ -213,6 +227,7 @@ class TestArchiveKeys(RteTestCase):
         ])
 
     def test_uuid_episode_routes(self):
+        """A current episode gives the same metadata (or archive key) via every URL that reaches it."""
         _, eps = programme_page('radio1', 'news-at-one')
         ep = next((str(i['id']) for i in eps or [] if not str(i['id']).isdigit()), None)
         if not ep:
@@ -225,6 +240,7 @@ class TestArchiveKeys(RteTestCase):
         ])
 
     def test_different_items_different_keys(self):
+        """Different items never share an archive key (so none is wrongly skipped)."""
         urls = [
             'https://www.rte.ie/radio/rnag/clips/5f025eb2-d6d0-449a-be23-b50000d5132f/',
             'https://www.rte.ie/radio/gold/clips/34788141-b67a-4ee4-b7a0-b4b4014cb486/',

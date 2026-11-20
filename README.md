@@ -48,9 +48,10 @@ DRM-protected items (RTÉ Player, live TV) are not supported. Items only availab
 Run it from the repository root:
 
 ```bash
-python3 -m unittest discover -v -s tests                   # normal run, about 7 minutes
-RTE_TESTS_SLOW=1 python3 -m unittest discover -v -s tests  # adds downloads and full listings
+python3 -m unittest discover -v -s tests
 ```
+
+The tests are kept lean. They don't download media files or walk through very long listings.
 
 Options:
 - `YTDLP=<path>` chooses the yt-dlp to test (default: `/usr/local/bin/yt-dlp`).
@@ -62,7 +63,6 @@ What it tests:
 - playlists: size limits, page boundaries, order, no duplicates, `-I` ranges, date filters and `--break-on-existing`;
 - one download-archive key per item, whichever URL it is reached by;
 - error handling: DRM, geo-blocking, expired items, empty lists, and RTÉ server errors (injected);
-- that vanilla yt-dlp still lacks support for these URLs, and that yt-dlp's own RTÉ extractors are left alone;
-- in slow mode, real downloads checked with ffprobe and ffmpeg.
+- that vanilla yt-dlp still lacks support for these URLs, and that yt-dlp's own RTÉ extractors are left alone.
 
 A test skipped with "RTÉ data changed" means an item it relies on is gone from RTÉ. That is not a plugin failure.
